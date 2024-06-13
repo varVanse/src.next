@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -331,20 +331,14 @@ void SlotAssignment::RecalcAssignment() {
     }
   }
 
-  // Update an dir=auto flag from a host of slots to its all descendants.
-  // We should call below functions outside FlatTreeTraversalForbiddenScope
-  // because we can go a tree walk to either their ancestors or descendants
-  // if needed.
-  if (owner_->NeedsDirAutoAttributeUpdate()) {
-    owner_->SetNeedsDirAutoAttributeUpdate(false);
-    if (auto* element = DynamicTo<HTMLElement>(owner_->host())) {
-      element->UpdateDescendantHasDirAutoAttribute(
-          element->SelfOrAncestorHasDirAutoAttribute());
+  // This needs to happen outside of the scope above, when flat tree traversal
+  // is allowed, because Element::UpdateDescendantHasDirAutoAttribute uses
+  // FlatTreeTraversal.
+  for (HTMLSlotElement* slot : Slots()) {
+    if (slot->HasDirectionAuto()) {
+      slot->AdjustDirectionAutoAfterRecalcAssignedNodes();
     }
   }
-  // Resolve the directionality of elements deferred their adjustment.
-  HTMLElement::AdjustCandidateDirectionalityForSlot(
-      std::move(candidate_directionality_set_));
 }
 
 const HeapVector<Member<HTMLSlotElement>>& SlotAssignment::Slots() {
@@ -379,7 +373,7 @@ void SlotAssignment::CollectSlots() {
   DCHECK(needs_collect_slots_);
   slots_.clear();
 
-  slots_.ReserveCapacity(slot_count_);
+  slots_.reserve(slot_count_);
   for (HTMLSlotElement& slot :
        Traversal<HTMLSlotElement>::DescendantsOf(*owner_)) {
     slots_.push_back(&slot);
@@ -401,7 +395,6 @@ void SlotAssignment::Trace(Visitor* visitor) const {
   visitor->Trace(slots_);
   visitor->Trace(slot_map_);
   visitor->Trace(owner_);
-  visitor->Trace(candidate_directionality_set_);
 }
 
 }  // namespace blink

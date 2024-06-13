@@ -239,16 +239,6 @@ TEST_F(LocalDOMWindowTest, EnforceSandboxFlags) {
 TEST_F(LocalDOMWindowTest, UserAgent) {
   EXPECT_EQ(GetFrame().DomWindow()->UserAgent(),
             GetFrame().Loader().UserAgent());
-  {
-    ScopedUserAgentReductionForTest s1(true);
-    EXPECT_EQ(GetFrame().DomWindow()->UserAgent(),
-              GetFrame().Loader().ReducedUserAgent());
-  }
-  {
-    ScopedSendFullUserAgentAfterReductionForTest s1(true);
-    EXPECT_EQ(GetFrame().DomWindow()->UserAgent(),
-              GetFrame().Loader().FullUserAgent());
-  }
 }
 
 // Tests ExecutionContext::GetContentSecurityPolicyForCurrentWorld().
@@ -271,7 +261,7 @@ TEST_F(PageTestBase, CSPForWorld) {
   v8::Isolate* isolate = main_world_script_state->GetIsolate();
 
   constexpr int kIsolatedWorldWithoutCSPId = 1;
-  scoped_refptr<DOMWrapperWorld> world_without_csp =
+  DOMWrapperWorld* world_without_csp =
       DOMWrapperWorld::EnsureIsolatedWorld(isolate, kIsolatedWorldWithoutCSPId);
   ASSERT_TRUE(world_without_csp->IsIsolatedWorld());
   ScriptState* isolated_world_without_csp_script_state =
@@ -279,7 +269,7 @@ TEST_F(PageTestBase, CSPForWorld) {
 
   const char* kIsolatedWorldCSP = "script-src 'none';";
   constexpr int kIsolatedWorldWithCSPId = 2;
-  scoped_refptr<DOMWrapperWorld> world_with_csp =
+  DOMWrapperWorld* world_with_csp =
       DOMWrapperWorld::EnsureIsolatedWorld(isolate, kIsolatedWorldWithCSPId);
   ASSERT_TRUE(world_with_csp->IsIsolatedWorld());
   ScriptState* isolated_world_with_csp_script_state =
@@ -334,6 +324,22 @@ TEST_F(LocalDOMWindowTest, ConsoleMessageCategory) {
     EXPECT_EQ(mojom::blink::ConsoleMessageCategory::Cors,
               *message_storage->at(i)->Category());
   }
+}
+TEST_F(LocalDOMWindowTest, NavigationId) {
+  String navigation_id1 = GetFrame().DomWindow()->GetNavigationId();
+  GetFrame().DomWindow()->GenerateNewNavigationId();
+  String navigation_id2 = GetFrame().DomWindow()->GetNavigationId();
+  GetFrame().DomWindow()->GenerateNewNavigationId();
+  String navigation_id3 = GetFrame().DomWindow()->GetNavigationId();
+  EXPECT_NE(navigation_id1, navigation_id2);
+  EXPECT_NE(navigation_id1, navigation_id3);
+  EXPECT_NE(navigation_id2, navigation_id3);
+}
+
+TEST_F(LocalDOMWindowTest, HasStorageAccess) {
+  EXPECT_FALSE(GetFrame().DomWindow()->HasStorageAccess());
+  GetFrame().DomWindow()->SetHasStorageAccess();
+  EXPECT_TRUE(GetFrame().DomWindow()->HasStorageAccess());
 }
 
 }  // namespace blink

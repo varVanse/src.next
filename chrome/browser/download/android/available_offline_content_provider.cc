@@ -8,11 +8,12 @@
 #include <utility>
 
 #include "base/base64.h"
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/memory/ref_counted_memory.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/strings/strcat.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "chrome/browser/download/android/download_open_source.h"
 #include "chrome/browser/download/android/download_utils.h"
@@ -159,10 +160,10 @@ class ThumbnailFetch {
   }
 
   void Complete() {
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE,
         base::BindOnce(std::move(complete_callback_), std::move(visuals_)));
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE,
         base::BindOnce(
             [](ThumbnailFetch* thumbnail_fetch) { delete thumbnail_fetch; },
@@ -173,9 +174,7 @@ class ThumbnailFetch {
     scoped_refptr<base::RefCountedMemory> data = image.As1xPNGBytes();
     if (!data || data->size() == 0)
       return GURL();
-    std::string png_base64;
-    base::Base64Encode(base::StringPiece(data->front_as<char>(), data->size()),
-                       &png_base64);
+    std::string png_base64 = base::Base64Encode(*data);
     return GURL(base::StrCat({"data:image/png;base64,", png_base64}));
   }
 

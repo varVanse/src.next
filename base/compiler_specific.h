@@ -41,7 +41,9 @@
 // Annotate a function indicating it should not be inlined.
 // Use like:
 //   NOINLINE void DoStuff() { ... }
-#if defined(COMPILER_GCC) || defined(__clang__)
+#if defined(__clang__) && HAS_ATTRIBUTE(noinline)
+#define NOINLINE [[clang::noinline]]
+#elif defined(COMPILER_GCC) && HAS_ATTRIBUTE(noinline)
 #define NOINLINE __attribute__((noinline))
 #elif defined(COMPILER_MSVC)
 #define NOINLINE __declspec(noinline)
@@ -49,7 +51,18 @@
 #define NOINLINE
 #endif
 
-#if defined(COMPILER_GCC) && defined(NDEBUG)
+// Annotate a function indicating it should not be optimized.
+#if defined(__clang__) && HAS_ATTRIBUTE(optnone)
+#define NOOPT [[clang::optnone]]
+#elif defined(COMPILER_GCC) && HAS_ATTRIBUTE(optimize)
+#define NOOPT __attribute__((optimize(0)))
+#else
+#define NOOPT
+#endif
+
+#if defined(__clang__) && defined(NDEBUG) && HAS_ATTRIBUTE(always_inline)
+#define ALWAYS_INLINE [[clang::always_inline]] inline
+#elif defined(COMPILER_GCC) && defined(NDEBUG) && HAS_ATTRIBUTE(always_inline)
 #define ALWAYS_INLINE inline __attribute__((__always_inline__))
 #elif defined(COMPILER_MSVC) && defined(NDEBUG)
 #define ALWAYS_INLINE __forceinline
@@ -64,9 +77,9 @@
 // folding of multiple identical caller functions into a single signature. To
 // prevent code folding, see NO_CODE_FOLDING() in base/debug/alias.h.
 // Use like:
-//   void NOT_TAIL_CALLED FooBar();
+//   NOT_TAIL_CALLED void FooBar();
 #if defined(__clang__) && HAS_ATTRIBUTE(not_tail_called)
-#define NOT_TAIL_CALLED __attribute__((not_tail_called))
+#define NOT_TAIL_CALLED [[clang::not_tail_called]]
 #else
 #define NOT_TAIL_CALLED
 #endif
@@ -78,23 +91,14 @@
 //
 // In most places you can use the C++11 keyword "alignas", which is preferred.
 //
-// But compilers have trouble mixing __attribute__((...)) syntax with
-// alignas(...) syntax.
-//
-// Doesn't work in clang or gcc:
-//   struct alignas(16) __attribute__((packed)) S { char c; };
-// Works in clang but not gcc:
-//   struct __attribute__((packed)) alignas(16) S2 { char c; };
-// Works in clang and gcc:
-//   struct alignas(16) S3 { char c; } __attribute__((packed));
-//
-// There are also some attributes that must be specified *before* a class
-// definition: visibility (used for exporting functions/classes) is one of
-// these attributes. This means that it is not possible to use alignas() with a
-// class that is marked as exported.
-#if defined(COMPILER_MSVC)
+// Historically, compilers had trouble mixing __attribute__((...)) syntax with
+// alignas(...) syntax. However, at least Clang is very accepting nowadays. It
+// may be that this macro can be removed entirely.
+#if defined(__clang__)
+#define ALIGNAS(byte_alignment) alignas(byte_alignment)
+#elif defined(COMPILER_MSVC)
 #define ALIGNAS(byte_alignment) __declspec(align(byte_alignment))
-#elif defined(COMPILER_GCC)
+#elif defined(COMPILER_GCC) && HAS_ATTRIBUTE(aligned)
 #define ALIGNAS(byte_alignment) __attribute__((aligned(byte_alignment)))
 #endif
 
@@ -106,19 +110,25 @@
 // References:
 // * https://en.cppreference.com/w/cpp/language/attributes/no_unique_address
 // * https://wg21.link/dcl.attr.nouniqueaddr
-#if HAS_CPP_ATTRIBUTE(no_unique_address)
+#if defined(COMPILER_MSVC) && HAS_CPP_ATTRIBUTE(msvc::no_unique_address)
+// Unfortunately MSVC ignores [[no_unique_address]] (see
+// https://devblogs.microsoft.com/cppblog/msvc-cpp20-and-the-std-cpp20-switch/#msvc-extensions-and-abi),
+// and clang-cl matches it for ABI compatibility reasons. We need to prefer
+// [[msvc::no_unique_address]] when available if we actually want any effect.
+#define NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
+#elif HAS_CPP_ATTRIBUTE(no_unique_address)
 #define NO_UNIQUE_ADDRESS [[no_unique_address]]
 #else
 #define NO_UNIQUE_ADDRESS
 #endif
 
-// Tell the compiler a function is using a printf-style format string.
+// Tells the compiler a function is using a printf-style format string.
 // |format_param| is the one-based index of the format string parameter;
 // |dots_param| is the one-based index of the "..." parameter.
 // For v*printf functions (which take a va_list), pass 0 for dots_param.
 // (This is undocumented but matches what the system C headers do.)
 // For member functions, the implicit this parameter counts as index 1.
-#if defined(COMPILER_GCC) || defined(__clang__)
+#if (defined(COMPILER_GCC) || defined(__clang__)) && HAS_ATTRIBUTE(format)
 #define PRINTF_FORMAT(format_param, dots_param) \
   __attribute__((format(printf, format_param, dots_param)))
 #else
@@ -163,7 +173,7 @@
 // DISABLE_CFI_PERF -- Disable Control Flow Integrity for perf reasons.
 #if !defined(DISABLE_CFI_PERF)
 #if defined(__clang__) && defined(OFFICIAL_BUILD)
-#define DISABLE_CFI_PERF __attribute__((no_sanitize("cfi")))
+#define DISABLE_CFI_PERF NO_SANITIZE("cfi")
 #else
 #define DISABLE_CFI_PERF
 #endif
@@ -290,7 +300,7 @@
 // please document the problem for someone who is going to cleanup it later.
 // E.g. platform, bot, benchmark or test name in patch description or next to
 // the attribute.
-#define STACK_UNINITIALIZED __attribute__((uninitialized))
+#define STACK_UNINITIALIZED [[clang::uninitialized]]
 #else
 #define STACK_UNINITIALIZED
 #endif
@@ -379,23 +389,27 @@ inline constexpr bool AnalyzerAssumeTrue(bool arg) {
 #define TRIVIAL_ABI
 #endif
 
+// Detect whether a type is trivially relocatable, ie. a move-and-destroy
+// sequence can replaced with memmove(). This can be used to optimise the
+// implementation of containers. This is automatically true for types that were
+// defined with TRIVIAL_ABI such as scoped_refptr.
+//
+// See also:
+//   https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2023/p1144r8.html
+//   https://clang.llvm.org/docs/LanguageExtensions.html#:~:text=__is_trivially_relocatable
+#if defined(__clang__) && HAS_BUILTIN(__is_trivially_relocatable)
+#define IS_TRIVIALLY_RELOCATABLE(t) __is_trivially_relocatable(t)
+#else
+#define IS_TRIVIALLY_RELOCATABLE(t) false
+#endif
+
 // Marks a member function as reinitializing a moved-from variable.
 // See also
-// https://clang.llvm.org/extra/clang-tidy/checks/bugprone-use-after-move.html#reinitialization
+// https://clang.llvm.org/extra/clang-tidy/checks/bugprone/use-after-move.html#reinitialization
 #if defined(__clang__) && HAS_ATTRIBUTE(reinitializes)
 #define REINITIALIZES_AFTER_MOVE [[clang::reinitializes]]
 #else
 #define REINITIALIZES_AFTER_MOVE
-#endif
-
-// Requires constant initialization. See constinit in C++20. Allows to rely on a
-// variable being initialized before execution, and not requiring a global
-// constructor.
-#if HAS_ATTRIBUTE(require_constant_initialization)
-#define CONSTINIT __attribute__((require_constant_initialization))
-#endif
-#if !defined(CONSTINIT)
-#define CONSTINIT
 #endif
 
 #if defined(__clang__)
@@ -406,13 +420,189 @@ inline constexpr bool AnalyzerAssumeTrue(bool arg) {
 #define GSL_POINTER
 #endif
 
-// Adds the "logically_const" tag to a symbol's mangled name, which can be
-// recognized by the "Mutable Constants" check
-// (https://chromium.googlesource.com/chromium/src/+/main/docs/speed/binary_size/android_binary_size_trybot.md#Mutable-Constants).
+// Adds the "logically_const" tag to a symbol's mangled name. The "Mutable
+// Constants" check [1] detects instances of constants that aren't in .rodata,
+// e.g. due to a missing `const`. Using this tag suppresses the check for this
+// symbol, allowing it to live outside .rodata without a warning.
+//
+// [1]:
+// https://crsrc.org/c/docs/speed/binary_size/android_binary_size_trybot.md#Mutable-Constants
 #if defined(COMPILER_GCC) || defined(__clang__)
 #define LOGICALLY_CONST [[gnu::abi_tag("logically_const")]]
 #else
 #define LOGICALLY_CONST
+#endif
+
+// preserve_most clang's calling convention. Reduces register pressure for the
+// caller and as such can be used for cold calls. Support for the
+// "preserve_most" attribute is limited:
+// - 32-bit platforms do not implement it,
+// - component builds fail because _dl_runtime_resolve() clobbers registers,
+// - there are crashes on arm64 on Windows (https://crbug.com/v8/14065), which
+//   can hopefully be fixed in the future.
+// Additionally, the initial implementation in clang <= 16 overwrote the return
+// register(s) in the epilogue of a preserve_most function, so we only use
+// preserve_most in clang >= 17 (see https://reviews.llvm.org/D143425).
+// Clang only supports preserve_most on X86-64 and AArch64 for now.
+// See https://clang.llvm.org/docs/AttributeReference.html#preserve-most for
+// more details.
+#if (defined(ARCH_CPU_ARM64) || defined(ARCH_CPU_X86_64)) && \
+    !(BUILDFLAG(IS_WIN) && defined(ARCH_CPU_ARM64)) &&       \
+    !defined(COMPONENT_BUILD) && defined(__clang__) &&       \
+    __clang_major__ >= 17 && HAS_ATTRIBUTE(preserve_most)
+#define PRESERVE_MOST __attribute__((preserve_most))
+#else
+#define PRESERVE_MOST
+#endif
+
+// Mark parameters or return types as having a lifetime attached to the class.
+//
+// When used to mark a method's pointer/reference parameter, the compiler is
+// made aware that it will be stored internally in the class and the pointee
+// must outlive the class. Typically used on constructor arguments. It should
+// appear to the right of the parameter's variable name.
+//
+// Example:
+// ```
+// struct S {
+//    S(int* p LIFETIME_BOUND) : ptr_(p) {}
+//
+//    int* ptr_;
+// };
+// ```
+//
+// When used on a method with a return value, the compiler is made aware that
+// the returned type is/has a pointer to the internals of the class, and must
+// not outlive the class object. It should appear after any method qualifiers.
+//
+// Example:
+// ```
+// struct S {
+//   int* GetPtr() const LIFETIME_BOUND { return i_; };
+//
+//   int i_;
+// };
+// ```
+//
+// This allows the compiler to warn in (a limited set of) cases where the
+// pointer would otherwise be left dangling, especially in cases where the
+// pointee would be a destroyed temporary.
+//
+// Docs: https://clang.llvm.org/docs/AttributeReference.html#lifetimebound
+#if defined(__clang__)
+#define LIFETIME_BOUND [[clang::lifetimebound]]
+#else
+#define LIFETIME_BOUND
+#endif
+
+// Mark a function as pure, meaning that it does not have side effects, meaning
+// that it does not write anything external to the function's local variables
+// and return value.
+//
+// WARNING: If this attribute is mis-used it will result in UB and
+// miscompilation, as the optimizator may fold multiple calls into one and
+// reorder them inappropriately. This shouldn't appear outside of key vocabulary
+// types. It allows callers to work with the vocab type directly, and call its
+// methods without having to worry about caching things into local variables in
+// hot code.
+//
+// This attribute must not appear on functions that make use of function
+// pointers, virtual methods, or methods of templates (including operators like
+// comparison), as the "pure" function can not know what those functions do and
+// can not guarantee there will never be sideeffects.
+#if defined(COMPILER_GCC) || defined(__clang__)
+#define PURE_FUNCTION [[gnu::pure]]
+#else
+#define PURE_FUNCTION
+#endif
+
+// Functions should be marked with UNSAFE_BUFFER_USAGE when they lead to
+// out-of-bounds bugs when called with incorrect inputs.
+//
+// Ideally such functions should be paired with a safer version that works with
+// safe primitives like `base::span`. Otherwise, another safer coding pattern
+// should be documented along side the use of `UNSAFE_BUFFER_USAGE`.
+//
+// All functions marked with UNSAFE_BUFFER_USAGE should come with a safety
+// comment that explains the requirements of the function to prevent any chance
+// of an out-of-bounds bug. For example:
+// ```
+// // Function to do things between `input` and `end`.
+// //
+// // # Safety
+// // The `input` must point to an array with size at least 5. The `end` must
+// // point within the same allocation of `input` and not come before `input`.
+// ```
+#if defined(__clang__) && HAS_ATTRIBUTE(unsafe_buffer_usage)
+#define UNSAFE_BUFFER_USAGE [[clang::unsafe_buffer_usage]]
+#else
+#define UNSAFE_BUFFER_USAGE
+#endif
+
+// UNSAFE_BUFFERS() wraps code that violates the -Wunsafe-buffer-usage warning,
+// such as:
+// - pointer arithmetic,
+// - pointer subscripting, and
+// - calls to functions annotated with UNSAFE_BUFFER_USAGE.
+//
+// ** USE OF THIS MACRO SHOULD BE VERY RARE.** Reviewers should push back when
+// it is not strictly necessary. Prefer to use `base::span` instead of pointers,
+// or other safer coding patterns (like std containers) that avoid the
+// opportunity for out-of-bounds bugs to creep into the code. Any use of
+// UNSAFE_BUFFERS() can lead to a critical security bug if any assumptions are
+// wrong, or ever become wrong in the future.
+//
+// The macro should be used to wrap the minimum necessary code, to make it clear
+// what is unsafe, and prevent accidentally opting extra things out of the
+// warning.
+//
+// All usage of UNSAFE_BUFFERS() should come with a `// SAFETY: ...` comment
+// that explains how we have guaranteed (ideally directly above, with conditions
+// or CHECKs) that the pointer usage can never go out-of-bounds, or that the
+// requirements of the UNSAFE_BUFFER_USAGE function are met. If the safety
+// explanation requires cooperation of code that is not fully encapsulated close
+// to the UNSAFE_BUFFERS() usage, it should be rejected and replaced with safer
+// coding patterns or stronger guarantees.
+#if defined(__clang__)
+// clang-format off
+// Formatting is off so that we can put each _Pragma on its own line, as
+// recommended by the gcc docs.
+#define UNSAFE_BUFFERS(...)                  \
+  _Pragma("clang unsafe_buffer_usage begin") \
+  __VA_ARGS__                                \
+  _Pragma("clang unsafe_buffer_usage end")
+// clang-format on
+#else
+#define UNSAFE_BUFFERS(...) __VA_ARGS__
+#endif
+
+// Defines a condition for a function to be checked at compile time if the
+// parameter's value is known at compile time. If the condition is failed, the
+// function is omitted from the overload set resolution, much like `requires`.
+//
+// If the parameter is a runtime value, then the condition is unable to be
+// checked and the function will be omitted from the overload set resolution.
+// This ensures the function can only be called with values known at compile
+// time. This is a clang extension.
+//
+// Example:
+// ```
+// void f(int a) ENABLE_IF_ATTR(a > 0) {}
+// f(1);  // Ok.
+// f(0);  // Error: no valid f() found.
+// ```
+//
+// The `ENABLE_IF_ATTR` annotation is preferred over `consteval` with a check
+// that breaks compile because metaprogramming does not observe such checks. So
+// with `consteval`, the function looks callable to concepts/type_traits but is
+// not and will fail to compile even though it reports it's usable. Whereas
+// `ENABLE_IF_ATTR` interacts correctly with metaprogramming. This is especially
+// painful for constructors. See also
+// https://github.com/chromium/subspace/issues/266.
+#if defined(__clang__)
+#define ENABLE_IF_ATTR(cond, msg) __attribute__((enable_if(cond, msg)))
+#else
+#define ENABLE_IF_ATTR(cond, msg)
 #endif
 
 #endif  // BASE_COMPILER_SPECIFIC_H_

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -30,6 +30,12 @@ CascadeFilter AddValidPropertiesFilter(
       return filter.Add(CSSProperty::kValidForHighlightLegacy, false);
     case ValidPropertyFilter::kHighlight:
       return filter.Add(CSSProperty::kValidForHighlight, false);
+    case ValidPropertyFilter::kPositionTry:
+      return filter.Add(CSSProperty::kValidForPositionTry, false);
+    case ValidPropertyFilter::kLimitedPageContext:
+      return filter.Add(CSSProperty::kValidForLimitedPageContext, false);
+    case ValidPropertyFilter::kPageContext:
+      return filter.Add(CSSProperty::kValidForPageContext, false);
   }
 }
 

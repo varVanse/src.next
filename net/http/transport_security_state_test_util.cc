@@ -5,6 +5,7 @@
 #include "net/http/transport_security_state_test_util.h"
 
 #include <iterator>
+#include <string_view>
 
 #include "base/stl_util.h"
 #include "base/strings/string_number_conversions.h"
@@ -39,7 +40,7 @@ ScopedTransportSecurityStateSource::ScopedTransportSecurityStateSource(
       continue;
     // Currently only one PKP report URI is supported.
     if (last_report_uri)
-      DCHECK_EQ(base::StringPiece(last_report_uri), pinset->report_uri);
+      DCHECK_EQ(std::string_view(last_report_uri), pinset->report_uri);
     else
       last_report_uri = pinset->report_uri;
     pkp_report_uri_ =
@@ -53,24 +54,10 @@ ScopedTransportSecurityStateSource::ScopedTransportSecurityStateSource(
                             : pkp_report_uri_.c_str()});
   }
 
-  for (size_t i = 0; base_source->expect_ct_report_uris[i]; ++i) {
-    expect_ct_report_uri_strings_.push_back(
-        GURL(base_source->expect_ct_report_uris[i])
-            .ReplaceComponents(replace_port)
-            .spec());
-  }
-  for (const std::string& s : expect_ct_report_uri_strings_)
-    expect_ct_report_uris_.push_back(s.c_str());
-  expect_ct_report_uris_.push_back(nullptr);
-
   const net::TransportSecurityStateSource new_source = {
-      base_source->huffman_tree,
-      base_source->huffman_tree_size,
-      base_source->preloaded_data,
-      base_source->preloaded_bits,
-      base_source->root_position,
-      expect_ct_report_uris_.data(),
-      pinsets_.data(),
+      base_source->huffman_tree,   base_source->huffman_tree_size,
+      base_source->preloaded_data, base_source->preloaded_bits,
+      base_source->root_position,  pinsets_.data(),
       base_source->pinsets_count};
 
   source_ = std::make_unique<TransportSecurityStateSource>(new_source);

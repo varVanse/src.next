@@ -46,6 +46,8 @@ class METRICS_EXPORT DelegatingUkmRecorder : public UkmRecorder {
   // The pointer is only used as a key.
   void RemoveDelegate(UkmRecorder* delegate);
 
+  bool HasMultipleDelegates();
+
  private:
   friend class AppSourceUrlRecorder;
   friend class internal::SourceUrlRecorderWebContentsObserver;
@@ -60,6 +62,8 @@ class METRICS_EXPORT DelegatingUkmRecorder : public UkmRecorder {
       SourceId source_id,
       const UkmSource::NavigationData& navigation_data) override;
   void AddEntry(mojom::UkmEntryPtr entry) override;
+  void RecordWebFeatures(SourceId source_id,
+                         const std::set<DummyWebFeatures>& features) override;
   void MarkSourceForDeletion(SourceId source_id) override;
 
   class Delegate final {
@@ -76,6 +80,8 @@ class METRICS_EXPORT DelegatingUkmRecorder : public UkmRecorder {
     void RecordNavigation(SourceId source_id,
                           const UkmSource::NavigationData& navigation_data);
     void AddEntry(mojom::UkmEntryPtr entry);
+    void RecordWebFeatures(SourceId source_id,
+                           const std::set<DummyWebFeatures>& features);
     void MarkSourceForDeletion(SourceId source_id);
 
    private:

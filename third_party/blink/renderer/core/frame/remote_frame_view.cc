@@ -1,13 +1,15 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/frame/remote_frame_view.h"
 
-#include "base/cxx17_backports.h"
+#include <algorithm>
+
 #include "components/paint_preview/common/paint_preview_tracker.h"
 #include "printing/buildflags/buildflags.h"
 #include "third_party/blink/public/common/frame/frame_owner_element_type.h"
+#include "third_party/blink/public/common/page/page_zoom.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
@@ -27,7 +29,7 @@
 
 #if BUILDFLAG(ENABLE_PRINTING)
 // nogncheck because dependency on //printing is conditional upon
-// enable_basic_printing flags.
+// enable_printing flags.
 #include "printing/metafile_skia.h"  // nogncheck
 #endif
 
@@ -46,8 +48,7 @@ LocalFrameView* RemoteFrameView::ParentFrameView() const {
     return nullptr;
 
   HTMLFrameOwnerElement* owner = remote_frame_->DeprecatedLocalOwner();
-  if (owner && (owner->OwnerType() == FrameOwnerElementType::kPortal ||
-                owner->OwnerType() == FrameOwnerElementType::kFencedframe)) {
+  if (owner && owner->OwnerType() == FrameOwnerElementType::kFencedframe) {
     return owner->GetDocument().GetFrame()->View();
   }
 
@@ -65,8 +66,7 @@ LocalFrameView* RemoteFrameView::ParentLocalRootFrameView() const {
     return nullptr;
 
   HTMLFrameOwnerElement* owner = remote_frame_->DeprecatedLocalOwner();
-  if (owner && (owner->OwnerType() == FrameOwnerElementType::kPortal ||
-                owner->OwnerType() == FrameOwnerElementType::kFencedframe)) {
+  if (owner && owner->OwnerType() == FrameOwnerElementType::kFencedframe) {
     return owner->GetDocument().GetFrame()->LocalFrameRoot().View();
   }
 
@@ -99,7 +99,7 @@ void RemoteFrameView::DetachFromLayout() {
 
 bool RemoteFrameView::UpdateViewportIntersectionsForSubtree(
     unsigned parent_flags,
-    absl::optional<base::TimeTicks>&) {
+    std::optional<base::TimeTicks>&) {
   UpdateViewportIntersection(parent_flags, needs_occlusion_tracking_);
   return needs_occlusion_tracking_;
 }
@@ -148,8 +148,8 @@ gfx::Rect RemoteFrameView::ComputeCompositingRect() const {
       owner_layout_object->PhysicalContentBoxOffset());
   owner_layout_object->MapLocalToAncestor(nullptr, local_root_transform_state,
                                           kTraverseDocumentBoundaries);
-  TransformationMatrix matrix =
-      local_root_transform_state.AccumulatedTransform().Inverse();
+  gfx::Transform matrix =
+      local_root_transform_state.AccumulatedTransform().InverseOrIdentity();
   PhysicalRect local_viewport_rect = PhysicalRect::EnclosingRect(
       matrix.ProjectQuad(gfx::QuadF(gfx::RectF(viewport_rect))).BoundingBox());
   gfx::Rect compositing_rect = ToEnclosingRect(local_viewport_rect);
@@ -197,9 +197,8 @@ void RemoteFrameView::UpdateCompositingRect() {
   // embedding frame, updating this can be used for communication with a fenced
   // frame. So if the frame size is frozen, we use the complete viewport of the
   // child frame as its compositing rect.
-  if (auto frozen_size = owner_layout_object->FrozenFrameSize()) {
-    compositing_rect_ =
-        gfx::Rect(frozen_size->width.Ceil(), frozen_size->height.Ceil());
+  if (frozen_size_) {
+    compositing_rect_ = gfx::Rect(*frozen_size_);
   } else {
     compositing_rect_ = ComputeCompositingRect();
   }
@@ -226,8 +225,8 @@ void RemoteFrameView::UpdateCompositingScaleFactor() {
 
   float frame_to_local_root_scale_factor = 1.0f;
   gfx::Transform local_root_transform =
-      local_root_transform_state.AccumulatedTransform().ToTransform();
-  absl::optional<gfx::Vector2dF> scale_components =
+      local_root_transform_state.AccumulatedTransform();
+  std::optional<gfx::Vector2dF> scale_components =
       gfx::TryComputeTransform2dScaleComponents(local_root_transform);
   if (!scale_components) {
     frame_to_local_root_scale_factor =
@@ -252,8 +251,8 @@ void RemoteFrameView::UpdateCompositingScaleFactor() {
   constexpr float kMinCompositingScaleFactor = 0.25f;
   constexpr float kMaxCompositingScaleFactor = 5.0f;
   compositing_scale_factor_ =
-      base::clamp(compositing_scale_factor_, kMinCompositingScaleFactor,
-                  kMaxCompositingScaleFactor);
+      std::clamp(compositing_scale_factor_, kMinCompositingScaleFactor,
+                 kMaxCompositingScaleFactor);
 
   if (compositing_scale_factor_ != previous_scale_factor)
     remote_frame_->SynchronizeVisualProperties();
@@ -269,9 +268,30 @@ void RemoteFrameView::Dispose() {
 }
 
 void RemoteFrameView::SetFrameRect(const gfx::Rect& rect) {
+  UpdateFrozenSize();
   EmbeddedContentView::SetFrameRect(rect);
   if (needs_frame_rect_propagation_)
     PropagateFrameRects();
+}
+
+void RemoteFrameView::UpdateFrozenSize() {
+  if (frozen_size_)
+    return;
+  auto* layout_embedded_content = GetLayoutEmbeddedContent();
+  if (!layout_embedded_content)
+    return;
+  std::optional<PhysicalSize> frozen_phys_size =
+      layout_embedded_content->FrozenFrameSize();
+  if (!frozen_phys_size)
+    return;
+  const gfx::Size rounded_frozen_size(frozen_phys_size->width.Ceil(),
+                                      frozen_phys_size->height.Ceil());
+  frozen_size_ = rounded_frozen_size;
+  needs_frame_rect_propagation_ = true;
+}
+
+void RemoteFrameView::ZoomChanged(float zoom_factor) {
+  remote_frame_->ZoomLevelChanged(PageZoomFactorToZoomLevel(zoom_factor));
 }
 
 void RemoteFrameView::PropagateFrameRects() {
@@ -286,13 +306,7 @@ void RemoteFrameView::PropagateFrameRects() {
     rect_in_local_root = parent->ConvertToRootFrame(rect_in_local_root);
   }
 
-  gfx::Size frame_size = frame_rect.size();
-  if (auto* layout_object = GetLayoutEmbeddedContent()) {
-    if (auto frozen_size = layout_object->FrozenFrameSize()) {
-      frame_size =
-          gfx::Size(frozen_size->width.Ceil(), frozen_size->height.Ceil());
-    }
-  }
+  gfx::Size frame_size = frozen_size_.value_or(frame_rect.size());
   remote_frame_->FrameRectsChanged(frame_size, rect_in_local_root);
 }
 
@@ -427,7 +441,7 @@ uint32_t RemoteFrameView::CapturePaintPreview(const gfx::Rect& rect,
   // to this HTMLFrameOwnerElement yet (over IPC). If the token is null the
   // failure can be handled gracefully by simply ignoring the subframe in the
   // result.
-  absl::optional<base::UnguessableToken> maybe_embedding_token =
+  std::optional<base::UnguessableToken> maybe_embedding_token =
       remote_frame_->GetEmbeddingToken();
   if (!maybe_embedding_token.has_value())
     return 0;

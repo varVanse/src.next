@@ -36,8 +36,9 @@
 #include "ui/gfx/skia_util.h"
 
 #if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "chrome/browser/ash/login/users/scoped_test_user_manager.h"
+#include "chrome/browser/ash/login/users/chrome_user_manager_impl.h"
 #include "chrome/browser/ash/settings/scoped_cros_settings_test_helper.h"
+#include "components/user_manager/scoped_user_manager.h"
 #endif
 
 using extensions::mojom::ManifestLocation;
@@ -101,7 +102,7 @@ class ExtensionActionIconFactoryTest
 
   void WaitForIconUpdate() {
     quit_in_icon_updated_ = true;
-    base::RunLoop().Run();
+    loop_.Run();
     quit_in_icon_updated_ = false;
   }
 
@@ -118,19 +119,19 @@ class ExtensionActionIconFactoryTest
     std::string error;
     JSONFileValueDeserializer deserializer(
         test_file.AppendASCII("manifest.json"));
-    std::unique_ptr<base::DictionaryValue> valid_value =
-        base::DictionaryValue::From(
-            deserializer.Deserialize(&error_code, &error));
+    std::unique_ptr<base::Value> valid_value =
+        deserializer.Deserialize(&error_code, &error);
     EXPECT_EQ(0, error_code) << error;
     if (error_code != 0)
       return nullptr;
 
-    EXPECT_TRUE(valid_value.get());
-    if (!valid_value)
+    EXPECT_TRUE(valid_value.get() && valid_value->is_dict());
+    if (!valid_value || !valid_value->is_dict())
       return nullptr;
 
-    scoped_refptr<Extension> extension = Extension::Create(
-        test_file, location, *valid_value, Extension::NO_FLAGS, &error);
+    scoped_refptr<Extension> extension =
+        Extension::Create(test_file, location, valid_value->GetDict(),
+                          Extension::NO_FLAGS, &error);
     EXPECT_TRUE(extension.get()) << error;
     if (extension.get())
       extension_service_->AddExtension(extension.get());
@@ -148,13 +149,12 @@ class ExtensionActionIconFactoryTest
 
   void TearDown() override {
     profile_.reset();  // Get all DeleteSoon calls sent to ui_loop_.
-    base::RunLoop().RunUntilIdle();
   }
 
   // ExtensionActionIconFactory::Observer overrides:
   void OnIconUpdated() override {
     if (quit_in_icon_updated_)
-      base::RunLoop::QuitCurrentWhenIdleDeprecated();
+      loop_.QuitWhenIdle();
   }
 
   gfx::ImageSkia GetFavicon() {
@@ -173,11 +173,13 @@ class ExtensionActionIconFactoryTest
   content::BrowserTaskEnvironment task_environment_;
   bool quit_in_icon_updated_;
   std::unique_ptr<TestingProfile> profile_;
-  raw_ptr<ExtensionService> extension_service_;
+  raw_ptr<ExtensionService, DanglingUntriaged> extension_service_;
+  base::RunLoop loop_;
 
 #if BUILDFLAG(IS_CHROMEOS_ASH)
   ash::ScopedCrosSettingsTestHelper cros_settings_test_helper_;
-  ash::ScopedTestUserManager test_user_manager_;
+  user_manager::ScopedUserManager test_user_manager_{
+      ash::ChromeUserManagerImpl::CreateChromeUserManager()};
 #endif
 };
 

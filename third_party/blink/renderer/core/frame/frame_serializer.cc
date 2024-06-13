@@ -74,6 +74,8 @@
 
 namespace blink {
 
+using mojom::blink::FormControlType;
+
 class SerializerMarkupAccumulator : public MarkupAccumulator {
   STACK_ALLOCATED();
 
@@ -89,7 +91,8 @@ class SerializerMarkupAccumulator : public MarkupAccumulator {
   bool ShouldIgnoreElement(const Element&) const override;
   AtomicString AppendElement(const Element&) override;
   void AppendAttribute(const Element&, const Attribute&) override;
-  std::pair<Node*, Element*> GetAuxiliaryDOMTree(const Element&) const override;
+  std::pair<ShadowRoot*, HTMLTemplateElement*> GetShadowTree(
+      const Element&) const override;
 
  private:
   void AppendAttributeValue(const String& attribute_value);
@@ -114,7 +117,7 @@ SerializerMarkupAccumulator::SerializerMarkupAccumulator(
     : MarkupAccumulator(kResolveAllURLs,
                         IsA<HTMLDocument>(document) ? SerializationType::kHTML
                                                     : SerializationType::kXML,
-                        kNoShadowRoots),
+                        ShadowRootInclusion()),
       delegate_(delegate),
       resource_delegate_(resource_delegate),
       document_(&document) {}
@@ -243,15 +246,15 @@ void SerializerMarkupAccumulator::AppendAttribute(const Element& element,
   MarkupAccumulator::AppendAttribute(element, attribute);
 }
 
-std::pair<Node*, Element*> SerializerMarkupAccumulator::GetAuxiliaryDOMTree(
-    const Element& element) const {
-  return delegate_.GetAuxiliaryDOMTree(element);
+std::pair<ShadowRoot*, HTMLTemplateElement*>
+SerializerMarkupAccumulator::GetShadowTree(const Element& element) const {
+  return delegate_.GetShadowTree(element);
 }
 
 void SerializerMarkupAccumulator::AppendAttributeValue(
     const String& attribute_value) {
-  MarkupFormatter::AppendAttributeValue(markup_, attribute_value,
-                                        IsA<HTMLDocument>(document_));
+  MarkupFormatter::AppendAttributeValue(
+      markup_, attribute_value, IsA<HTMLDocument>(document_), *document_);
 }
 
 void SerializerMarkupAccumulator::AppendRewrittenAttribute(
@@ -336,7 +339,8 @@ void FrameSerializer::AddResourceForElement(Document& document,
     ImageResourceContent* cached_image = image->CachedImage();
     AddImageToResources(cached_image, document.CompleteURL(image_url_value));
   } else if (const auto* input = DynamicTo<HTMLInputElement>(element)) {
-    if (input->type() == input_type_names::kImage && input->ImageLoader()) {
+    if (input->FormControlType() == FormControlType::kInputImage &&
+        input->ImageLoader()) {
       KURL image_url = input->Src();
       ImageResourceContent* cached_image = input->ImageLoader()->GetContent();
       AddImageToResources(cached_image, image_url);
@@ -386,9 +390,9 @@ void FrameSerializer::SerializeCSSStyleSheet(CSSStyleSheet& style_sheet,
     css_text.Append("\";\n\n");
 
     for (unsigned i = 0; i < style_sheet.length(); ++i) {
-      CSSRule* rule = style_sheet.item(i);
+      CSSRule* rule = style_sheet.ItemInternal(i);
       String item_text = rule->cssText();
-      if (!item_text.IsEmpty()) {
+      if (!item_text.empty()) {
         css_text.Append(item_text);
         if (i < style_sheet.length() - 1)
           css_text.Append("\n\n");
@@ -408,7 +412,7 @@ void FrameSerializer::SerializeCSSStyleSheet(CSSStyleSheet& style_sheet,
   // Sub resources need to be serialized even if the CSS definition doesn't
   // need to be.
   for (unsigned i = 0; i < style_sheet.length(); ++i)
-    SerializeCSSRule(style_sheet.item(i));
+    SerializeCSSRule(style_sheet.ItemInternal(i));
 }
 
 void FrameSerializer::SerializeCSSRule(CSSRule* rule) {
@@ -436,7 +440,8 @@ void FrameSerializer::SerializeCSSRule(CSSRule* rule) {
     case CSSRule::kSupportsRule:
     case CSSRule::kContainerRule:
     case CSSRule::kLayerBlockRule:
-    case CSSRule::kScopeRule: {
+    case CSSRule::kScopeRule:
+    case CSSRule::kStartingStyleRule: {
       CSSRuleList* rule_list = rule->cssRules();
       for (unsigned i = 0; i < rule_list->length(); ++i)
         SerializeCSSRule(rule_list->item(i));
@@ -456,6 +461,8 @@ void FrameSerializer::SerializeCSSRule(CSSRule* rule) {
     // Rules in which no external resources can be referenced
     case CSSRule::kCharsetRule:
     case CSSRule::kFontPaletteValuesRule:
+    case CSSRule::kFontFeatureRule:
+    case CSSRule::kFontFeatureValuesRule:
     case CSSRule::kPageRule:
     case CSSRule::kPropertyRule:
     case CSSRule::kKeyframesRule:
@@ -463,8 +470,8 @@ void FrameSerializer::SerializeCSSRule(CSSRule* rule) {
     case CSSRule::kNamespaceRule:
     case CSSRule::kViewportRule:
     case CSSRule::kLayerStatementRule:
-    case CSSRule::kPositionFallbackRule:
-    case CSSRule::kTryRule:
+    case CSSRule::kViewTransitionRule:
+    case CSSRule::kPositionTryRule:
       break;
   }
 }

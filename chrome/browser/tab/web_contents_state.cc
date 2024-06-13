@@ -14,8 +14,10 @@
 #include <vector>
 
 #include "base/android/jni_android.h"
+#include "base/android/jni_bytebuffer.h"
 #include "base/android/jni_string.h"
 #include "base/logging.h"
+#include "base/metrics/histogram_macros.h"
 #include "base/pickle.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_manager.h"
@@ -37,6 +39,21 @@ using base::android::MethodID;
 using base::android::ScopedJavaLocalRef;
 using content::NavigationController;
 using content::WebContents;
+
+WebContentsStateByteBuffer::WebContentsStateByteBuffer(
+    base::android::ScopedJavaLocalRef<jobject> web_contents_byte_buffer_result,
+    int saved_state_version)
+    : state_version(saved_state_version) {
+  JNIEnv* env = base::android::AttachCurrentThread();
+  java_buffer.Reset(web_contents_byte_buffer_result);
+  backing_buffer = base::android::JavaByteBufferToSpan(env, java_buffer.obj());
+}
+WebContentsStateByteBuffer::~WebContentsStateByteBuffer() = default;
+
+WebContentsStateByteBuffer& WebContentsStateByteBuffer::operator=(
+    WebContentsStateByteBuffer&& other) noexcept = default;
+WebContentsStateByteBuffer::WebContentsStateByteBuffer(
+    WebContentsStateByteBuffer&& other) noexcept = default;
 
 namespace {
 
@@ -236,21 +253,26 @@ void UpgradeNavigationFromV1ToV2(
 // Extracts state and navigation entries from the given Pickle data and returns
 // whether un-pickling the data succeeded
 bool ExtractNavigationEntries(
-    void* data,
-    int size,
+    base::span<const uint8_t> buffer,
     int saved_state_version,
     bool* is_off_the_record,
     int* current_entry_index,
     std::vector<sessions::SerializedNavigationEntry>* navigations) {
   int entry_count;
-  base::Pickle pickle(static_cast<char*>(data), size);
+  base::Pickle pickle = base::Pickle::WithUnownedBuffer(buffer);
   base::PickleIterator iter(pickle);
   if (!iter.ReadBool(is_off_the_record) || !iter.ReadInt(&entry_count) ||
       !iter.ReadInt(current_entry_index)) {
-    LOG(ERROR) << "Failed to restore state from byte array (length=" << size
-               << ").";
+    LOG(ERROR) << "Failed to restore state from byte array (length="
+               << buffer.size() << ").";
     return false;
   }
+
+  // TODO(https://crbug.com/1520963): Remove this once we have enough data to
+  // conclude whether V0 and V1 are still used.
+  constexpr size_t kHighestVersion = 3;
+  UMA_HISTOGRAM_EXACT_LINEAR("Android.WebContentsState.SavedStateVersion",
+                             saved_state_version, kHighestVersion);
 
   if (!saved_state_version) {
     // When |saved_state_version| is 0, it predates our notion of each tab
@@ -267,16 +289,13 @@ bool ExtractNavigationEntries(
     for (int i = 0; i < entry_count; ++i) {
       // Read each SerializedNavigationEntry as a separate pickle to avoid
       // optional reads of one tab bleeding into the next tab's data.
-      size_t tab_navigation_data_length = 0;
-      const char* tab_navigation_data = nullptr;
-      if (!iter.ReadData(&tab_navigation_data, &tab_navigation_data_length)) {
-        LOG(ERROR) << "Failed to restore tab entry from byte array. "
-                   << "(SerializedNavigationEntry size="
-                   << tab_navigation_data_length << ").";
+      std::optional<base::span<const uint8_t>> tab_entry = iter.ReadData();
+      if (!tab_entry.has_value()) {
+        LOG(ERROR) << "Failed to restore tab entry from byte array.";
         return false;  // It's dangerous to keep deserializing now, give up.
       }
-      base::Pickle tab_navigation_pickle(tab_navigation_data,
-                                         tab_navigation_data_length);
+      base::Pickle tab_navigation_pickle =
+          base::Pickle::WithUnownedBuffer(*tab_entry);
       base::PickleIterator tab_navigation_pickle_iterator(
           tab_navigation_pickle);
       sessions::SerializedNavigationEntry nav;
@@ -346,47 +365,7 @@ ScopedJavaLocalRef<jobject> WriteNavigationsAsByteBuffer(
                                                 serialized, current_entry);
 }
 
-// Restores a WebContents from the passed in state.
-WebContents* RestoreContentsFromByteBuffer(void* data,
-                                           int size,
-                                           int saved_state_version,
-                                           bool initially_hidden,
-                                           bool no_renderer) {
-  bool is_off_the_record;
-  int current_entry_index;
-  std::vector<sessions::SerializedNavigationEntry> navigations;
-  bool success = ExtractNavigationEntries(data, size, saved_state_version,
-                                          &is_off_the_record,
-                                          &current_entry_index, &navigations);
-  if (!success)
-    return nullptr;
-
-  Profile* profile = ProfileManager::GetActiveUserProfile();
-  std::vector<std::unique_ptr<content::NavigationEntry>> entries =
-      sessions::ContentSerializedNavigationBuilder::ToNavigationEntries(
-          navigations, profile);
-
-  if (is_off_the_record) {
-    // Serialization and deserialization related functionalities are only
-    // supported for Incognito tabbed Activities and they use primary OTR
-    // profile.
-    profile = profile->GetPrimaryOTRProfile(/*create_if_needed=*/true);
-  }
-
-  WebContents::CreateParams params(profile);
-
-  params.initially_hidden = initially_hidden;
-  if (no_renderer) {
-    params.desired_renderer_state =
-        WebContents::CreateParams::kNoRendererProcess;
-  }
-  std::unique_ptr<WebContents> web_contents(WebContents::Create(params));
-  web_contents->GetController().Restore(
-      current_entry_index, content::RestoreType::kRestored, &entries);
-  return web_contents.release();
-}
-
-}  // anonymous namespace
+}  // namespace
 
 ScopedJavaLocalRef<jobject> WebContentsState::GetContentsStateAsByteBuffer(
     JNIEnv* env,
@@ -399,7 +378,7 @@ ScopedJavaLocalRef<jobject> WebContentsState::GetContentsStateAsByteBuffer(
   // Don't try to persist initial NavigationEntry, as it is not actually
   // associated with any navigation and will just result in about:blank on
   // session restore.
-  if (entry_count == 0 || controller.GetLastCommittedEntry()->IsInitialEntry())
+  if (controller.GetLastCommittedEntry()->IsInitialEntry())
     return ScopedJavaLocalRef<jobject>();
 
   std::vector<content::NavigationEntry*> navigations(entry_count);
@@ -415,16 +394,15 @@ ScopedJavaLocalRef<jobject> WebContentsState::GetContentsStateAsByteBuffer(
 ScopedJavaLocalRef<jobject>
 WebContentsState::DeleteNavigationEntriesFromByteBuffer(
     JNIEnv* env,
-    void* data,
-    int size,
+    base::span<const uint8_t> buffer,
     int saved_state_version,
     const DeletionPredicate& predicate) {
   bool is_off_the_record;
   int current_entry_index;
   std::vector<sessions::SerializedNavigationEntry> navigations;
-  bool success = ExtractNavigationEntries(data, size, saved_state_version,
-                                          &is_off_the_record,
-                                          &current_entry_index, &navigations);
+  bool success =
+      ExtractNavigationEntries(buffer, saved_state_version, &is_off_the_record,
+                               &current_entry_index, &navigations);
   if (!success)
     return ScopedJavaLocalRef<jobject>();
 
@@ -451,15 +429,14 @@ WebContentsState::DeleteNavigationEntriesFromByteBuffer(
 
 ScopedJavaLocalRef<jstring> WebContentsState::GetDisplayTitleFromByteBuffer(
     JNIEnv* env,
-    void* data,
-    int size,
+    base::span<const uint8_t> buffer,
     int saved_state_version) {
   bool is_off_the_record;
   int current_entry_index;
   std::vector<sessions::SerializedNavigationEntry> navigations;
-  bool success = ExtractNavigationEntries(data, size, saved_state_version,
-                                          &is_off_the_record,
-                                          &current_entry_index, &navigations);
+  bool success =
+      ExtractNavigationEntries(buffer, saved_state_version, &is_off_the_record,
+                               &current_entry_index, &navigations);
   if (!success)
     return ScopedJavaLocalRef<jstring>();
 
@@ -470,15 +447,14 @@ ScopedJavaLocalRef<jstring> WebContentsState::GetDisplayTitleFromByteBuffer(
 
 ScopedJavaLocalRef<jstring> WebContentsState::GetVirtualUrlFromByteBuffer(
     JNIEnv* env,
-    void* data,
-    int size,
+    base::span<const uint8_t> buffer,
     int saved_state_version) {
   bool is_off_the_record;
   int current_entry_index;
   std::vector<sessions::SerializedNavigationEntry> navigations;
-  bool success = ExtractNavigationEntries(data, size, saved_state_version,
-                                          &is_off_the_record,
-                                          &current_entry_index, &navigations);
+  bool success =
+      ExtractNavigationEntries(buffer, saved_state_version, &is_off_the_record,
+                               &current_entry_index, &navigations);
   if (!success)
     return ScopedJavaLocalRef<jstring>();
 
@@ -493,20 +469,67 @@ ScopedJavaLocalRef<jobject> WebContentsState::RestoreContentsFromByteBuffer(
     jint saved_state_version,
     jboolean initially_hidden,
     jboolean no_renderer) {
-  void* data = env->GetDirectBufferAddress(state);
-  int size = env->GetDirectBufferCapacity(state);
+  base::span<const uint8_t> span =
+      base::android::JavaByteBufferToSpan(env, state);
 
-  // If the ByteBuffer is invalid for some reason, early out.
-  if (!data || size <= 0)
-    return ScopedJavaLocalRef<jobject>();
-
-  WebContents* web_contents = ::RestoreContentsFromByteBuffer(
-      data, size, saved_state_version, initially_hidden, no_renderer);
+  WebContents* web_contents =
+      WebContentsState::RestoreContentsFromByteBufferImpl(
+          span, saved_state_version, initially_hidden, no_renderer)
+          .release();
 
   if (web_contents)
     return web_contents->GetJavaWebContents();
   else
     return ScopedJavaLocalRef<jobject>();
+}
+
+std::unique_ptr<WebContents> WebContentsState::RestoreContentsFromByteBuffer(
+    const WebContentsStateByteBuffer* byte_buffer,
+    bool initially_hidden,
+    bool no_renderer) {
+  return WebContentsState::RestoreContentsFromByteBufferImpl(
+      byte_buffer->backing_buffer, byte_buffer->state_version, initially_hidden,
+      no_renderer);
+}
+
+std::unique_ptr<WebContents>
+WebContentsState::RestoreContentsFromByteBufferImpl(
+    base::span<const uint8_t> buffer,
+    int saved_state_version,
+    bool initially_hidden,
+    bool no_renderer) {
+  bool is_off_the_record;
+  int current_entry_index;
+  std::vector<sessions::SerializedNavigationEntry> navigations;
+  bool success =
+      ExtractNavigationEntries(buffer, saved_state_version, &is_off_the_record,
+                               &current_entry_index, &navigations);
+  if (!success)
+    return nullptr;
+
+  Profile* profile = ProfileManager::GetActiveUserProfile();
+  std::vector<std::unique_ptr<content::NavigationEntry>> entries =
+      sessions::ContentSerializedNavigationBuilder::ToNavigationEntries(
+          navigations, profile);
+
+  if (is_off_the_record) {
+    // Serialization and deserialization related functionalities are only
+    // supported for Incognito tabbed Activities and they use primary OTR
+    // profile.
+    profile = profile->GetPrimaryOTRProfile(/*create_if_needed=*/true);
+  }
+
+  WebContents::CreateParams params(profile);
+
+  params.initially_hidden = initially_hidden;
+  if (no_renderer) {
+    params.desired_renderer_state =
+        WebContents::CreateParams::kNoRendererProcess;
+  }
+  std::unique_ptr<WebContents> web_contents(WebContents::Create(params));
+  web_contents->GetController().Restore(
+      current_entry_index, content::RestoreType::kRestored, &entries);
+  return web_contents;
 }
 
 ScopedJavaLocalRef<jobject>
@@ -527,10 +550,13 @@ WebContentsState::CreateSingleNavigationStateAsByteBuffer(
   url::Origin initiator_origin;
   if (jinitiator_origin)
     initiator_origin = url::Origin::FromJavaObject(jinitiator_origin);
+  // TODO(https://crbug.com/1399608): Deal with getting initiator_base_url
+  // plumbed here too.
   std::unique_ptr<content::NavigationEntry> entry(
       content::NavigationController::CreateNavigationEntry(
           GURL(base::android::ConvertJavaStringToUTF8(env, url)), referrer,
-          initiator_origin, ui::PAGE_TRANSITION_LINK,
+          initiator_origin, /* initiator_base_url= */ std::nullopt,
+          ui::PAGE_TRANSITION_LINK,
           true,  // is_renderer_initiated
           "",    // extra_headers
           ProfileManager::GetActiveUserProfile(),
@@ -570,18 +596,14 @@ JNI_WebContentsStateBridge_DeleteNavigationEntries(
     const base::android::JavaParamRef<jobject>& state,
     jint saved_state_version,
     jlong predicate_ptr) {
-  void* data = env->GetDirectBufferAddress(state);
-  int size = env->GetDirectBufferCapacity(state);
-
-  // If the ByteBuffer is invalid for some reason, early out.
-  if (!data || size <= 0)
-    return ScopedJavaLocalRef<jobject>();
+  base::span<const uint8_t> span =
+      base::android::JavaByteBufferToSpan(env, state);
 
   const auto* predicate =
       reinterpret_cast<WebContentsState::DeletionPredicate*>(predicate_ptr);
 
   return WebContentsState::DeleteNavigationEntriesFromByteBuffer(
-      env, data, size, saved_state_version, *predicate);
+      env, span, saved_state_version, *predicate);
 }
 
 static ScopedJavaLocalRef<jobject>
@@ -602,15 +624,11 @@ JNI_WebContentsStateBridge_GetDisplayTitleFromByteBuffer(
     JNIEnv* env,
     const JavaParamRef<jobject>& state,
     jint saved_state_version) {
-  void* data = env->GetDirectBufferAddress(state);
-  int size = env->GetDirectBufferCapacity(state);
-
-  // If the ByteBuffer is invalid for some reason, early out.
-  if (!data || size <= 0)
-    return ScopedJavaLocalRef<jstring>();
+  base::span<const uint8_t> span =
+      base::android::JavaByteBufferToSpan(env, state);
 
   ScopedJavaLocalRef<jstring> result =
-      WebContentsState::GetDisplayTitleFromByteBuffer(env, data, size,
+      WebContentsState::GetDisplayTitleFromByteBuffer(env, span,
                                                       saved_state_version);
   return result;
 }
@@ -620,15 +638,11 @@ JNI_WebContentsStateBridge_GetVirtualUrlFromByteBuffer(
     JNIEnv* env,
     const JavaParamRef<jobject>& state,
     jint saved_state_version) {
-  void* data = env->GetDirectBufferAddress(state);
-  int size = env->GetDirectBufferCapacity(state);
-
-  // If the ByteBuffer is invalid for some reason, early out.
-  if (!data || size <= 0)
-    return ScopedJavaLocalRef<jstring>();
+  base::span<const uint8_t> span =
+      base::android::JavaByteBufferToSpan(env, state);
 
   ScopedJavaLocalRef<jstring> result =
-      WebContentsState::GetVirtualUrlFromByteBuffer(env, data, size,
+      WebContentsState::GetVirtualUrlFromByteBuffer(env, span,
                                                     saved_state_version);
   return result;
 }

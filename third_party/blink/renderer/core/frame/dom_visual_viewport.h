@@ -31,7 +31,8 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_DOM_VISUAL_VIEWPORT_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_DOM_VISUAL_VIEWPORT_H_
 
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <optional>
+
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/dom/events/event_target.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
@@ -45,7 +46,7 @@ class LocalDOMWindow;
 class ExecutionContext;
 class DOMRect;
 
-class CORE_EXPORT DOMVisualViewport final : public EventTargetWithInlineData {
+class CORE_EXPORT DOMVisualViewport final : public EventTarget {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
@@ -65,7 +66,7 @@ class CORE_EXPORT DOMVisualViewport final : public EventTargetWithInlineData {
   double width() const;
   double height() const;
   double scale() const;
-  absl::optional<HeapVector<Member<DOMRect>>> segments() const;
+  std::optional<HeapVector<Member<DOMRect>>> segments() const;
 
   DEFINE_ATTRIBUTE_EVENT_LISTENER(resize, kResize)
   DEFINE_ATTRIBUTE_EVENT_LISTENER(scroll, kScroll)

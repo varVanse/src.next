@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -32,8 +32,9 @@ LocalFontFaceSource::~LocalFontFaceSource() {}
 bool LocalFontFaceSource::IsLocalNonBlocking() const {
   FontUniqueNameLookup* unique_name_lookup =
       FontGlobalContext::Get().GetFontUniqueNameLookup();
-  if (!unique_name_lookup)
+  if (!unique_name_lookup) {
     return true;
+  }
   return unique_name_lookup->IsFontUniqueNameLookupReadyForSyncLookup();
 }
 
@@ -43,30 +44,30 @@ bool LocalFontFaceSource::IsLocalFontAvailable(
   // TODO(crbug.com/1025945): Properly handle Windows prior to 10 and Android.
   bool font_available = FontCache::Get().IsPlatformFontUniqueNameMatchAvailable(
       font_description, font_name_);
-  if (font_available)
+  if (font_available) {
     font_selector_->ReportSuccessfulLocalFontMatch(font_name_);
-  else
+  } else {
     font_selector_->ReportFailedLocalFontMatch(font_name_);
+  }
   return font_available;
 }
 
-scoped_refptr<SimpleFontData>
-LocalFontFaceSource::CreateLoadingFallbackFontData(
+const SimpleFontData* LocalFontFaceSource::CreateLoadingFallbackFontData(
     const FontDescription& font_description) {
   FontCachePurgePreventer font_cache_purge_preventer;
-  scoped_refptr<SimpleFontData> temporary_font =
-      FontCache::Get().GetLastResortFallbackFont(font_description,
-                                                 kDoNotRetain);
+  const SimpleFontData* temporary_font =
+      FontCache::Get().GetLastResortFallbackFont(font_description);
   if (!temporary_font) {
     NOTREACHED();
     return nullptr;
   }
-  scoped_refptr<CSSCustomFontData> css_font_data =
-      CSSCustomFontData::Create(this, CSSCustomFontData::kVisibleFallback);
-  return SimpleFontData::Create(temporary_font->PlatformData(), css_font_data);
+  CSSCustomFontData* css_font_data = MakeGarbageCollected<CSSCustomFontData>(
+      this, CSSCustomFontData::kVisibleFallback);
+  return MakeGarbageCollected<SimpleFontData>(&temporary_font->PlatformData(),
+                                              css_font_data);
 }
 
-scoped_refptr<SimpleFontData> LocalFontFaceSource::CreateFontData(
+const SimpleFontData* LocalFontFaceSource::CreateFontData(
     const FontDescription& font_description,
     const FontSelectionCapabilities&) {
   if (!IsValid()) {
@@ -78,13 +79,14 @@ scoped_refptr<SimpleFontData> LocalFontFaceSource::CreateFontData(
   probe::LocalFontsEnabled(font_selector_->GetExecutionContext(),
                            &local_fonts_enabled);
 
-  if (!local_fonts_enabled)
+  if (!local_fonts_enabled) {
     return nullptr;
+  }
 
   if (IsValid() && IsLoading()) {
-    scoped_refptr<SimpleFontData> fallback_font_data =
+    const SimpleFontData* fallback_font_data =
         CreateLoadingFallbackFontData(font_description);
-    ReportFontLookup(font_description, fallback_font_data.get(),
+    ReportFontLookup(font_description, fallback_font_data,
                      true /* is_loading_fallback */);
     return fallback_font_data;
   }
@@ -102,34 +104,35 @@ scoped_refptr<SimpleFontData> LocalFontFaceSource::CreateFontData(
   // pass font_description to avoid breaking Google Fonts.
   FontDescription unstyled_description(font_description);
 #if !BUILDFLAG(IS_ANDROID)
-  unstyled_description.SetStretch(NormalWidthValue());
-  unstyled_description.SetStyle(NormalSlopeValue());
-  unstyled_description.SetWeight(NormalWeightValue());
+  unstyled_description.SetStretch(kNormalWidthValue);
+  unstyled_description.SetStyle(kNormalSlopeValue);
+  unstyled_description.SetWeight(kNormalWeightValue);
 #endif
   // TODO(https://crbug.com/1302264): Enable passing down of font-palette
   // information here (font_description.GetFontPalette()).
-  scoped_refptr<SimpleFontData> font_data = FontCache::Get().GetFontData(
+  const SimpleFontData* font_data = FontCache::Get().GetFontData(
       unstyled_description, font_name_, AlternateFontName::kLocalUniqueFace);
-  histograms_.Record(font_data.get());
-  ReportFontLookup(unstyled_description, font_data.get());
+  histograms_.Record(font_data);
+  ReportFontLookup(unstyled_description, font_data);
   return font_data;
 }
 
 void LocalFontFaceSource::BeginLoadIfNeeded() {
-  if (IsLoaded())
+  if (IsLoaded()) {
     return;
+  }
 
   FontUniqueNameLookup* unique_name_lookup =
       FontGlobalContext::Get().GetFontUniqueNameLookup();
   DCHECK(unique_name_lookup);
   unique_name_lookup->PrepareFontUniqueNameLookup(
-      WTF::Bind(&LocalFontFaceSource::NotifyFontUniqueNameLookupReady,
-                WrapWeakPersistent(this)));
+      WTF::BindOnce(&LocalFontFaceSource::NotifyFontUniqueNameLookupReady,
+                    WrapWeakPersistent(this)));
   face_->DidBeginLoad();
 }
 
 void LocalFontFaceSource::NotifyFontUniqueNameLookupReady() {
-  PruneTable();
+  ClearTable();
 
   if (face_->FontLoaded(this)) {
     font_selector_->FontFaceInvalidated(
@@ -150,8 +153,9 @@ bool LocalFontFaceSource::IsValid() const {
 }
 
 void LocalFontFaceSource::LocalFontHistograms::Record(bool load_success) {
-  if (reported_)
+  if (reported_) {
     return;
+  }
   reported_ = true;
   base::UmaHistogramBoolean("WebFont.LocalFontUsed", load_success);
 }
@@ -164,7 +168,7 @@ void LocalFontFaceSource::Trace(Visitor* visitor) const {
 
 void LocalFontFaceSource::ReportFontLookup(
     const FontDescription& font_description,
-    SimpleFontData* font_data,
+    const SimpleFontData* font_data,
     bool is_loading_fallback) {
   font_selector_->ReportFontLookupByUniqueNameOnly(
       font_name_, font_description, font_data, is_loading_fallback);

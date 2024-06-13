@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -54,6 +54,8 @@ class CORE_EXPORT EmbeddedContentView : public GarbageCollectedMixin {
   // Typically, it will be invoked by FrameRectsChanged; but it can also be
   // called directly to push frame rect information without changing it.
   virtual void PropagateFrameRects() = 0;
+
+  virtual void ZoomChanged(float zoom_factor) {}
 
   gfx::Rect FrameRect() const { return gfx::Rect(Location(), Size()); }
   gfx::Point Location() const;

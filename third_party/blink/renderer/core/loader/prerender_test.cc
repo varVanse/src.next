@@ -39,7 +39,6 @@
 #include "third_party/blink/public/mojom/prerender/prerender.mojom-blink.h"
 #include "third_party/blink/public/platform/web_cache.h"
 #include "third_party/blink/public/platform/web_string.h"
-#include "third_party/blink/public/platform/web_url_loader_mock_factory.h"
 #include "third_party/blink/public/web/web_frame.h"
 #include "third_party/blink/public/web/web_no_state_prefetch_client.h"
 #include "third_party/blink/public/web/web_script_source.h"
@@ -50,7 +49,9 @@
 #include "third_party/blink/renderer/core/frame/frame_test_helpers.h"
 #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
 #include "third_party/blink/renderer/core/html_element_type_helpers.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
+#include "third_party/blink/renderer/platform/testing/url_loader_mock_factory.h"
 #include "third_party/blink/renderer/platform/testing/url_test_helpers.h"
 
 namespace blink {
@@ -158,6 +159,13 @@ class PrerenderTest : public testing::Test {
     return processors_;
   }
 
+  bool IsUseCounted(WebFeature feature) {
+    return web_view_helper_.LocalMainFrame()
+        ->GetFrame()
+        ->GetDocument()
+        ->IsUseCounted(feature);
+  }
+
  private:
   void UnregisterMockPrerenderProcessor() {
     GetBrowserInterfaceBroker().SetBinderForTesting(
@@ -169,6 +177,7 @@ class PrerenderTest : public testing::Test {
         ->GetFrame()
         ->GetBrowserInterfaceBroker();
   }
+  test::TaskEnvironment task_environment_;
 
   std::vector<std::unique_ptr<MockNoStatePrefetchProcessor>> processors_;
 
@@ -289,6 +298,60 @@ TEST_F(PrerenderTest, MutateRel) {
   ExecuteScript("mutateRel()");
 
   EXPECT_EQ(1u, processor.CancelCount());
+}
+
+TEST_F(PrerenderTest, OriginTypeUseCounter) {
+  Initialize("http://example.com/", "prerender/any_prerender.html");
+
+  ASSERT_FALSE(IsUseCounted(WebFeature::kLinkRelPrerenderSameOrigin));
+  ASSERT_FALSE(IsUseCounted(WebFeature::kLinkRelPrerenderSameSiteCrossOrigin));
+  ASSERT_FALSE(IsUseCounted(WebFeature::kLinkRelPrerenderCrossSite));
+
+  // Add <link rel="prerender"> for a same-origin URL.
+  {
+    ExecuteScript("createLinkRelPrerender('http://example.com/prerender')");
+    ASSERT_EQ(processors().size(), 1u);
+    MockNoStatePrefetchProcessor& processor = *processors()[0];
+
+    EXPECT_EQ(KURL("http://example.com/prerender"), processor.Url());
+    EXPECT_EQ(mojom::blink::PrerenderTriggerType::kLinkRelPrerender,
+              processor.PrerenderTriggerType());
+
+    EXPECT_TRUE(IsUseCounted(WebFeature::kLinkRelPrerenderSameOrigin));
+    EXPECT_FALSE(
+        IsUseCounted(WebFeature::kLinkRelPrerenderSameSiteCrossOrigin));
+    EXPECT_FALSE(IsUseCounted(WebFeature::kLinkRelPrerenderCrossSite));
+  }
+
+  // Add <link rel="prerender"> for a same-site cross-origin URL.
+  {
+    ExecuteScript("createLinkRelPrerender('http://www.example.com/prerender')");
+    ASSERT_EQ(processors().size(), 2u);
+    MockNoStatePrefetchProcessor& processor = *processors()[1];
+
+    EXPECT_EQ(KURL("http://www.example.com/prerender"), processor.Url());
+    EXPECT_EQ(mojom::blink::PrerenderTriggerType::kLinkRelPrerender,
+              processor.PrerenderTriggerType());
+
+    EXPECT_TRUE(IsUseCounted(WebFeature::kLinkRelPrerenderSameOrigin));
+    EXPECT_TRUE(IsUseCounted(WebFeature::kLinkRelPrerenderSameSiteCrossOrigin));
+    EXPECT_FALSE(IsUseCounted(WebFeature::kLinkRelPrerenderCrossSite));
+  }
+
+  // Add <link rel="prerender"> for a cross-site URL.
+  {
+    ExecuteScript("createLinkRelPrerender('https://example.com/prerender')");
+    ASSERT_EQ(processors().size(), 3u);
+    MockNoStatePrefetchProcessor& processor = *processors()[2];
+
+    EXPECT_EQ(KURL("https://example.com/prerender"), processor.Url());
+    EXPECT_EQ(mojom::blink::PrerenderTriggerType::kLinkRelPrerender,
+              processor.PrerenderTriggerType());
+
+    EXPECT_TRUE(IsUseCounted(WebFeature::kLinkRelPrerenderSameOrigin));
+    EXPECT_TRUE(IsUseCounted(WebFeature::kLinkRelPrerenderSameSiteCrossOrigin));
+    EXPECT_TRUE(IsUseCounted(WebFeature::kLinkRelPrerenderCrossSite));
+  }
 }
 
 }  // namespace blink

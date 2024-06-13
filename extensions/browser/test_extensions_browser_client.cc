@@ -11,11 +11,12 @@
 #include "extensions/browser/extension_host_delegate.h"
 #include "extensions/browser/test_runtime_api_delegate.h"
 #include "extensions/browser/updater/null_extension_cache.h"
+#include "extensions/common/extension_id.h"
 #include "services/network/public/mojom/url_loader.mojom.h"
 #include "ui/base/l10n/l10n_util.h"
 
 #if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "chromeos/login/login_state/login_state.h"
+#include "chromeos/ash/components/login/login_state/login_state.h"
 #endif
 
 using content::BrowserContext;
@@ -61,7 +62,7 @@ bool TestExtensionsBrowserClient::AreExtensionsDisabled(
   return false;
 }
 
-bool TestExtensionsBrowserClient::IsValidContext(BrowserContext* context) {
+bool TestExtensionsBrowserClient::IsValidContext(void* context) {
   return context == main_context_ ||
          (incognito_context_ && context == incognito_context_);
 }
@@ -93,36 +94,37 @@ BrowserContext* TestExtensionsBrowserClient::GetOriginalContext(
 }
 
 content::BrowserContext*
-TestExtensionsBrowserClient::GetRedirectedContextInIncognito(
+TestExtensionsBrowserClient::GetContextRedirectedToOriginal(
     content::BrowserContext* context,
-    bool force_guest_profile,
-    bool force_system_profile) {
+    bool force_guest_profile) {
   return GetOriginalContext(context);
 }
 
-content::BrowserContext*
-TestExtensionsBrowserClient::GetContextForRegularAndIncognito(
+content::BrowserContext* TestExtensionsBrowserClient::GetContextOwnInstance(
     content::BrowserContext* context,
-    bool force_guest_profile,
-    bool force_system_profile) {
+    bool force_guest_profile) {
   return context;
 }
 
-content::BrowserContext* TestExtensionsBrowserClient::GetRegularProfile(
+content::BrowserContext* TestExtensionsBrowserClient::GetContextForOriginalOnly(
     content::BrowserContext* context,
-    bool force_guest_profile,
-    bool force_system_profile) {
+    bool force_guest_profile) {
   // Default implementation of
   // `BrowserContextKeyedServiceFactory::GetBrowserContextToUse()`.
   return context->IsOffTheRecord() ? nullptr : context;
 }
 
+bool TestExtensionsBrowserClient::AreExtensionsDisabledForContext(
+    content::BrowserContext* context) {
+  return false;
+}
+
 #if BUILDFLAG(IS_CHROMEOS_ASH)
 std::string TestExtensionsBrowserClient::GetUserIdHashFromContext(
     content::BrowserContext* context) {
-  if (context != main_context_ || !chromeos::LoginState::IsInitialized())
+  if (context != main_context_ || !ash::LoginState::IsInitialized())
     return "";
-  return chromeos::LoginState::Get()->primary_user_hash();
+  return ash::LoginState::Get()->primary_user_hash();
 }
 #endif
 
@@ -139,7 +141,7 @@ bool TestExtensionsBrowserClient::IsGuestSession(
 }
 
 bool TestExtensionsBrowserClient::IsExtensionIncognitoEnabled(
-    const std::string& extension_id,
+    const ExtensionId& extension_id,
     content::BrowserContext* context) const {
   return false;
 }
@@ -183,7 +185,8 @@ bool TestExtensionsBrowserClient::AllowCrossRendererResourceLoad(
 
 PrefService* TestExtensionsBrowserClient::GetPrefServiceForContext(
     BrowserContext* context) {
-  return nullptr;
+  auto iter = set_pref_service_for_context_.find(context);
+  return iter != set_pref_service_for_context_.end() ? iter->second : nullptr;
 }
 
 void TestExtensionsBrowserClient::GetEarlyExtensionPrefsObservers(
@@ -193,6 +196,13 @@ void TestExtensionsBrowserClient::GetEarlyExtensionPrefsObservers(
 ProcessManagerDelegate* TestExtensionsBrowserClient::GetProcessManagerDelegate()
     const {
   return process_manager_delegate_;
+}
+
+mojo::PendingRemote<network::mojom::URLLoaderFactory>
+TestExtensionsBrowserClient::GetControlledFrameEmbedderURLLoader(
+    int frame_tree_node_id,
+    content::BrowserContext* browser_context) {
+  return mojo::PendingRemote<network::mojom::URLLoaderFactory>();
 }
 
 std::unique_ptr<ExtensionHostDelegate>

@@ -4,8 +4,9 @@
 
 #include "chrome/browser/search/most_visited_iframe_source.h"
 
+#include <string_view>
+
 #include "base/memory/ref_counted_memory.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "build/build_config.h"
 #include "chrome/browser/search/instant_service.h"
@@ -56,7 +57,7 @@ void MostVisitedIframeSource::StartDataRequest(
 }
 
 std::string MostVisitedIframeSource::GetMimeType(const GURL& url) {
-  base::StringPiece path = url.path_piece();
+  std::string_view path = url.path_piece();
   if (base::EndsWith(path, ".js", base::CompareCase::INSENSITIVE_ASCII))
     return "application/javascript";
   if (base::EndsWith(path, ".css", base::CompareCase::INSENSITIVE_ASCII))
@@ -115,7 +116,8 @@ void MostVisitedIframeSource::SendJSWithOrigin(
       ui::ResourceBundle::GetSharedInstance().LoadDataResourceString(
           resource_id);
   base::ReplaceFirstSubstringAfterOffset(&response, 0, "{{ORIGIN}}", origin);
-  std::move(callback).Run(base::RefCountedString::TakeString(&response));
+  std::move(callback).Run(
+      base::MakeRefCounted<base::RefCountedString>(std::move(response)));
 }
 
 bool MostVisitedIframeSource::GetOrigin(

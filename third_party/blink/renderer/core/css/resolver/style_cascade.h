@@ -1,4 +1,4 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,6 +11,8 @@
 #include "third_party/blink/renderer/core/css/css_property_value.h"
 #include "third_party/blink/renderer/core/css/parser/css_parser_token.h"
 #include "third_party/blink/renderer/core/css/parser/css_parser_token_range.h"
+#include "third_party/blink/renderer/core/css/parser/css_tokenized_value.h"
+#include "third_party/blink/renderer/core/css/parser/css_tokenizer.h"
 #include "third_party/blink/renderer/core/css/properties/css_bitset.h"
 #include "third_party/blink/renderer/core/css/properties/css_property.h"
 #include "third_party/blink/renderer/core/css/resolver/cascade_filter.h"
@@ -30,12 +32,13 @@ namespace blink {
 
 class CascadeInterpolations;
 class CascadeResolver;
-class CSSCustomPropertyDeclaration;
+class CSSMathFunctionValue;
 class CSSParserContext;
+class CSSParserTokenStream;
 class CSSProperty;
+class CSSUnparsedDeclarationValue;
 class CSSValue;
 class CSSVariableData;
-class CSSVariableReferenceValue;
 class CustomProperty;
 class MatchResult;
 class StyleResolverState;
@@ -43,6 +46,7 @@ class StyleResolverState;
 namespace cssvalue {
 
 class CSSPendingSubstitutionValue;
+class CSSFlipRevertValue;
 
 }  // namespace cssvalue
 
@@ -63,6 +67,8 @@ class CORE_EXPORT StyleCascade {
   STACK_ALLOCATED();
 
   using CSSPendingSubstitutionValue = cssvalue::CSSPendingSubstitutionValue;
+  using CSSFlipRevertValue = cssvalue::CSSFlipRevertValue;
+  using Signal = CSSSelector::Signal;
 
  public:
   StyleCascade(StyleResolverState& state) : state_(state) {}
@@ -148,11 +154,18 @@ class CORE_EXPORT StyleCascade {
   HeapHashMap<CSSPropertyName, Member<const CSSValue>> GetCascadedValues()
       const;
 
-  // The maximum number of tokens that may be produced by a var()
-  // reference.
+  // Resolves a single CSSValue in the context of some StyleResolverState.
   //
-  // https://drafts.csswg.org/css-variables/#long-variables
-  static const size_t kMaxSubstitutionTokens = 65536;
+  // This is intended for use by the Inspector Agent.
+  //
+  // The function is primarily useful for eliminating var()/env() references.
+  // It will also handle other kinds of resolution (e.g. eliminate 'revert'),
+  // but note that the specified declaration will appear alone and uncontested
+  // in a temporary StyleCascade, so e.g. 'revert' always becomes 'unset',
+  // as there is nothing else to revert to.
+  static const CSSValue* Resolve(StyleResolverState&,
+                                 const CSSPropertyName&,
+                                 const CSSValue&);
 
  private:
   friend class TestCascade;
@@ -167,6 +180,7 @@ class CORE_EXPORT StyleCascade {
   void AnalyzeIfNeeded();
   void AnalyzeMatchResult();
   void AnalyzeInterpolations();
+  void AddExplicitDefaults();
 
   // Clears the CascadeMap and other state, and analyzes the MatchResult/
   // interpolations again.
@@ -241,7 +255,7 @@ class CORE_EXPORT StyleCascade {
   // However, actually building a CSSVariableData is optional; you can also
   // get a CSSParserTokenRange directly, which is useful when resolving a
   // CSSVariableData which won't ultimately end up in a CSSVariableData
-  // (i.e. CSSVariableReferenceValue or CSSPendingSubstitutionValue).
+  // (i.e. CSSUnparsedDeclarationValue or CSSPendingSubstitutionValue).
   class TokenSequence {
     STACK_ALLOCATED();
 
@@ -257,34 +271,55 @@ class CORE_EXPORT StyleCascade {
     CSSParserTokenRange TokenRange() const {
       return CSSParserTokenRange{tokens_};
     }
+    String OriginalText() { return original_text_.ToString(); }
 
-    bool Append(const TokenSequence&, wtf_size_t);
     bool Append(CSSVariableData* data,
-                wtf_size_t limit = std::numeric_limits<wtf_size_t>::max());
-    void Append(const CSSParserToken&);
+                CSSTokenizer* parent_tokenizer,
+                wtf_size_t byte_limit = std::numeric_limits<wtf_size_t>::max());
+    void Append(const CSSParserToken&, StringView string);
+
+    // NOTE: Strips surrounding whitespace (the other are assumed to
+    // already have done that).
+    bool AppendFallback(const TokenSequence&, wtf_size_t byte_limit);
+
+    // Remove all token comment from tokens_ (does not affect original_text_).
+    // This is required if you're actually sending the token range
+    // on to a Parse() function, since many of them don't expect
+    // comment tokens.
+    //
+    // In many ways, it would be nicer just not to include the comment tokens
+    // in the first place, but when constructing the original text during
+    // variable substitution, we check tokens_.back() to see if we need to
+    // insert blank comments or not, so we can't just discard them. There are
+    // cases where we don't _need_ the original text, though, and in those cases
+    // we could also probably strip tokens immediately. But it seems this
+    // requires building what is effectively two separate variants (or a large
+    // template machinery) of TokenSequence and everything calling it.
+    void StripCommentTokens();
 
     scoped_refptr<CSSVariableData> BuildVariableData();
 
    private:
-    bool AppendTokens(base::span<const CSSParserToken>, wtf_size_t);
+    // In cases where we're not building a CSSValue, we don't really care about
+    // the tokens, only the original text (and the other way around; when
+    // building a CSSValue, we only really care about the tokens). However,
+    // we need a certain amount of token history to paste things correctly
+    // together (see NeedsInsertedComment()), and it rapidly gets complex to
+    // keep track of the cases where we need to remember what, so we always keep
+    // the vector here and accept the performance hit.
+    Vector<CSSParserToken, 8> tokens_;
 
-    Vector<CSSParserToken> tokens_;
-    Vector<scoped_refptr<const CSSVariableData>> variable_data_;
+    // The full text of the value we are constructing. We try to maintain
+    // the strings exactly as specified through variable substitution,
+    // including whitespace, unnormalized numbers and so on.
+    StringBuilder original_text_;
+
     // https://drafts.csswg.org/css-variables/#animation-tainted
     bool is_animation_tainted_ = false;
     // https://drafts.css-houdini.org/css-properties-values-api-1/#dependency-cycles
     bool has_font_units_ = false;
     bool has_root_font_units_ = false;
-
-    // The base URL and charset are currently needed to calculate the computed
-    // value of <url>-registered custom properties correctly.
-    //
-    // TODO(crbug.com/985013): Store CSSParserContext on
-    // CSSCustomPropertyDeclaration and avoid this.
-    //
-    // https://drafts.css-houdini.org/css-properties-values-api-1/#relative-urls
-    String base_url_;
-    WTF::TextEncoding charset_;
+    bool has_line_height_units_ = false;
   };
 
   // Resolving Values
@@ -309,11 +344,14 @@ class CORE_EXPORT StyleCascade {
                           CascadePriority,
                           CascadeOrigin&,
                           CascadeResolver&);
+  const CSSValue* ResolveSubstitutions(const CSSProperty&,
+                                       const CSSValue&,
+                                       CascadeResolver&);
   const CSSValue* ResolveCustomProperty(const CSSProperty&,
-                                        const CSSCustomPropertyDeclaration&,
+                                        const CSSUnparsedDeclarationValue&,
                                         CascadeResolver&);
   const CSSValue* ResolveVariableReference(const CSSProperty&,
-                                           const CSSVariableReferenceValue&,
+                                           const CSSUnparsedDeclarationValue&,
                                            CascadeResolver&);
   const CSSValue* ResolvePendingSubstitution(const CSSProperty&,
                                              const CSSPendingSubstitutionValue&,
@@ -323,13 +361,33 @@ class CORE_EXPORT StyleCascade {
                                 CascadeOrigin&,
                                 CascadeResolver&);
   const CSSValue* ResolveRevertLayer(const CSSProperty&,
-                                     const CSSValue&,
                                      CascadePriority,
                                      CascadeOrigin&,
                                      CascadeResolver&);
+  const CSSValue* ResolveFlipRevert(const CSSFlipRevertValue&,
+                                    CascadePriority,
+                                    CascadeOrigin&,
+                                    CascadeResolver&);
+  const CSSValue* ResolveMathFunction(const CSSProperty&,
+                                      const CSSMathFunctionValue&,
+                                      CascadePriority);
 
   scoped_refptr<CSSVariableData> ResolveVariableData(CSSVariableData*,
+                                                     const CSSParserContext&,
                                                      CascadeResolver&);
+
+  // Certain parts of CSS function evaluation may need some local context
+  // supplied by the caller. Given the current scoping strategy, the only
+  // relevant context is the arguments given to the function in current
+  // scope. (If we are not currently evaluating a function, this will be
+  // empty.) If we get to the point of supporting more dynamic scope,
+  // there may be a call stack or similar here, and possibly also locals.
+  struct FunctionContext {
+    STACK_ALLOCATED();
+
+   public:
+    HeapHashMap<String, Member<const CSSValue>> arguments;
+  };
 
   // The Resolve*Into functions either resolve dependencies, append to the
   // TokenSequence accordingly, and return true; or it returns false when
@@ -338,26 +396,70 @@ class CORE_EXPORT StyleCascade {
   // cycle was detected.
   //
   // [1] https://drafts.csswg.org/css-variables/#invalid-at-computed-value-time
+  //
+  // The CSSTokenizer* argument, if not nullptr, will be used to persist
+  // the given tokens' string values (see CSSTokenizer::PersistStrings).
 
-  bool ResolveTokensInto(CSSParserTokenRange, CascadeResolver&, TokenSequence&);
-  bool ResolveVarInto(CSSParserTokenRange, CascadeResolver&, TokenSequence&);
-  bool ResolveEnvInto(CSSParserTokenRange, CascadeResolver&, TokenSequence&);
+  bool ResolveTokensInto(CSSParserTokenStream&,
+                         CascadeResolver&,
+                         CSSTokenizer*,
+                         const CSSParserContext&,
+                         const FunctionContext&,
+                         TokenSequence&);
+  bool ResolveVarInto(CSSParserTokenStream&,
+                      CascadeResolver&,
+                      CSSTokenizer*,
+                      const CSSParserContext&,
+                      TokenSequence&);
+  bool ResolveEnvInto(CSSParserTokenStream&,
+                      CascadeResolver&,
+                      CSSTokenizer*,
+                      const CSSParserContext&,
+                      TokenSequence&);
+  bool ResolveArgInto(CSSParserTokenStream&,
+                      CascadeResolver&,
+                      CSSTokenizer*,
+                      const CSSParserContext&,
+                      const FunctionContext&,
+                      TokenSequence&);
+
+  // NOTE: The FunctionContext object must be the _caller's_ function context,
+  // not the one the function itself sets up. This is because it is used to
+  // resolve arguments given to this function. See comment within the
+  // definition.
+  bool ResolveFunctionInto(StringView function_name,
+                           CSSParserTokenStream& stream,
+                           CascadeResolver& resolver,
+                           CSSTokenizer* parent_tokenizer,
+                           const CSSParserContext& context,
+                           const FunctionContext& function_context,
+                           TokenSequence& out);
+
+  const CSSValue* ResolveFunctionExpression(
+      StringView expr,
+      const StyleRuleFunction::Type& type,
+      CascadeResolver& resolver,
+      const CSSParserContext& context,
+      const FunctionContext& function_context);
 
   CSSVariableData* GetVariableData(const CustomProperty&) const;
   CSSVariableData* GetEnvironmentVariable(const AtomicString&,
                                           WTF::Vector<unsigned>) const;
-  const CSSParserContext* GetParserContext(const CSSVariableReferenceValue&);
+  const CSSParserContext* GetParserContext(const CSSUnparsedDeclarationValue&);
 
   // Detects if the given property/data depends on the font-size property
   // of the Element we're calculating the style for.
   //
   // https://drafts.css-houdini.org/css-properties-values-api-1/#dependency-cycles
   bool HasFontSizeDependency(const CustomProperty&, CSSVariableData*) const;
+  // Detects if the given property/data depends on the line-height property of
+  // the Element we're calculating style for.
+  bool HasLineHeightDependency(const CustomProperty&, CSSVariableData*) const;
   // The fallback must match the syntax of the custom property, otherwise the
   // the declaration is "invalid at computed-value time".'
   //
   // https://drafts.css-houdini.org/css-properties-values-api-1/#fallbacks-in-var-references
-  bool ValidateFallback(const CustomProperty&, CSSParserTokenRange) const;
+  bool ValidateFallback(const CustomProperty&, CSSTokenizedValue) const;
   // Marks the CustomProperty as referenced by something. Needed to avoid
   // animating these custom properties on the compositor.
   void MarkIsReferenced(const CSSProperty& referencer,
@@ -366,12 +468,38 @@ class CORE_EXPORT StyleCascade {
   // disable the matched property cache in some cases.
   void MarkHasVariableReference(const CSSProperty&);
 
+  // Declarations originating from @position-try rules are treated as
+  // revert-layer if we're not out-of-flow positioned. Since such declarations
+  // exist in a separate layer, this has the effect of @position-try-originating
+  // rules applying *conditionally* based on the positioning.
+  //
+  // This behavior is needed because we speculatively add the the try set
+  // to the cascade, and rely on out-of-flow layout to correct us later.
+  // However, if we *stop* being out-of-flow positioned, that correction
+  // never happens.
+  bool TreatAsRevertLayer(CascadePriority) const;
+
   const Document& GetDocument() const;
   const CSSProperty& ResolveSurrogate(const CSSProperty& surrogate);
 
   void CountUse(WebFeature);
   void MaybeUseCountRevert(const CSSValue&);
   void MaybeUseCountSummaryDisplayBlock();
+
+  // Expands the cascade for the incoming `MatchedProperties`, and adds
+  // pending signals (via `MaybeAddPendingSignal`) for the declarations
+  // that actually change the cascade map.
+  void ExpandSignals(const MatchedProperties&, int index, Signal);
+  void MaybeAddPendingSignal(const CSSPropertyName& name,
+                             CascadePriority priority,
+                             Signal signal);
+
+  // Looks at pending signals produced by `ExpandSignals`, and either triggers
+  // a real use-count for the signals (if the signaling declaration ended up
+  // winning the cascade), or ignores them.
+  void ProcessPendingSignals();
+  void ProcessPendingSignals(WebFeature,
+                             const HashMap<CSSPropertyName, CascadePriority>&);
 
   StyleResolverState& state_;
   MatchResult match_result_;
@@ -422,6 +550,28 @@ class CORE_EXPORT StyleCascade {
   // computed value of the property affects how e.g. margin-inline-start
   // (and other css-logical properties) cascade.
   bool depends_on_cascade_affecting_property_ = false;
+  // See comment in StyleCascade::AddExplicitDefaults (.cc file).
+  bool effective_zoom_changed_ = false;
+  // If true, invisible rules will be added to the cascade, setting
+  // `has_invisible_rules_` to true whenever such rules are actually seen.
+  // Otherwise, invisible rules are silently ignored.
+  //
+  // Invisible rules are not supposed to have an observable effect on the result
+  // of the cascade, and exist entirely for use-counting purposes.
+  //
+  // Invisible rules are handled as follows in StyleCascade:
+  //
+  // We first cascade while allowing invisible rules. If we didn't end up with
+  // any invisible rules (the common case), then the result is what it needs to
+  // be, and we're done. If we *do* end up with any invisible rules, we have
+  // declarations in our cascade that are not supposed to be there, and we
+  // reset and cascade again, this time without allowing invisible rules.
+  bool allow_invisible_rules_ = true;
+  bool has_invisible_rules_ = false;
+  // Properties that had a signal (see CSSSelector::Signal) which changed
+  // the value of the cascade map.
+  HashMap<CSSPropertyName, CascadePriority>
+      pending_signals_[static_cast<wtf_size_t>(Signal::kMax)];
 };
 
 }  // namespace blink

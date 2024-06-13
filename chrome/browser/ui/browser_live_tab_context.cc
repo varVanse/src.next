@@ -5,16 +5,17 @@
 #include "chrome/browser/ui/browser_live_tab_context.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include "base/feature_list.h"
+#include "base/metrics/histogram_macros.h"
 #include "base/token.h"
+#include "base/uuid.h"
 #include "base/values.h"
 #include "chrome/browser/apps/app_service/web_contents_app_id_utils.h"
 #include "chrome/browser/browser_features.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/sessions/closed_tab_cache.h"
-#include "chrome/browser/sessions/closed_tab_cache_service_factory.h"
 #include "chrome/browser/sessions/session_service_utils.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
@@ -22,12 +23,16 @@
 #include "chrome/browser/ui/browser_tab_strip_model_delegate.h"
 #include "chrome/browser/ui/browser_tabrestore.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/tabs/saved_tab_groups/saved_tab_group_keyed_service.h"
+#include "chrome/browser/ui/tabs/saved_tab_groups/saved_tab_group_service_factory.h"
 #include "chrome/browser/ui/tabs/tab_group.h"
 #include "chrome/browser/ui/tabs/tab_group_model.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/ui_features.h"
 #include "chrome/browser/web_applications/web_app_helpers.h"
 #include "chrome/common/buildflags.h"
+#include "components/saved_tab_groups/features.h"
+#include "components/saved_tab_groups/saved_tab_group.h"
 #include "components/sessions/content/content_live_tab.h"
 #include "components/sessions/content/content_platform_specific_tab_data.h"
 #include "components/sessions/core/session_types.h"
@@ -115,7 +120,7 @@ std::map<std::string, std::string> BrowserLiveTabContext::GetExtraDataForTab(
 
 #if defined(TOOLKIT_VIEWS)
   if (IsSideSearchEnabled(browser_->profile())) {
-    absl::optional<std::pair<std::string, std::string>> side_search_data =
+    std::optional<std::pair<std::string, std::string>> side_search_data =
         side_search::MaybeGetSideSearchTabRestoreData(
             browser_->tab_strip_model()->GetWebContentsAt(index));
     if (side_search_data.has_value())
@@ -131,7 +136,7 @@ BrowserLiveTabContext::GetExtraDataForWindow() const {
   return std::map<std::string, std::string>();
 }
 
-absl::optional<tab_groups::TabGroupId> BrowserLiveTabContext::GetTabGroupForTab(
+std::optional<tab_groups::TabGroupId> BrowserLiveTabContext::GetTabGroupForTab(
     int index) const {
   return browser_->tab_strip_model()->GetTabGroupForTab(index);
 }
@@ -143,6 +148,27 @@ BrowserLiveTabContext::GetVisualDataForGroup(
       ->group_model()
       ->GetTabGroup(group)
       ->visual_data();
+}
+
+const std::optional<base::Uuid>
+BrowserLiveTabContext::GetSavedTabGroupIdForGroup(
+    const tab_groups::TabGroupId& group) const {
+  if (!tab_groups::IsTabGroupsSaveV2Enabled()) {
+    return std::nullopt;
+  }
+
+  Profile* profile = browser_->profile();
+  tab_groups::SavedTabGroupKeyedService* const service =
+      tab_groups::SavedTabGroupServiceFactory::GetForProfile(profile);
+
+  const tab_groups::SavedTabGroup* const saved_group =
+      service->model()->Get(group);
+
+  if (!saved_group) {
+    return std::nullopt;
+  }
+
+  return saved_group->saved_guid();
 }
 
 bool BrowserLiveTabContext::IsTabPinned(int index) const {
@@ -173,7 +199,7 @@ sessions::LiveTab* BrowserLiveTabContext::AddRestoredTab(
     int tab_index,
     int selected_navigation,
     const std::string& extension_app_id,
-    absl::optional<tab_groups::TabGroupId> group,
+    std::optional<tab_groups::TabGroupId> group,
     const tab_groups::TabGroupVisualData& group_visual_data,
     bool select,
     bool pin,
@@ -189,35 +215,15 @@ sessions::LiveTab* BrowserLiveTabContext::AddRestoredTab(
           : nullptr;
 
   TabGroupModel* group_model = browser_->tab_strip_model()->group_model();
-  const bool first_tab_in_group =
-      group.has_value() ? !group_model->ContainsTabGroup(group.value()) : false;
-
-  bool restored_from_closed_tab_cache = false;
+  const bool first_tab_in_group = group_model && group.has_value() &&
+                                  !group_model->ContainsTabGroup(group.value());
   WebContents* web_contents = nullptr;
-  if (tab_id) {
-    // Try to restore the WebContents from the ClosedTabCache rather than
-    // creating it again.
-    ClosedTabCache& cache =
-        ClosedTabCacheServiceFactory::GetForProfile(browser_->profile())
-            ->closed_tab_cache();
-    std::unique_ptr<WebContents> wc = cache.RestoreEntry(*tab_id);
 
-    if (wc) {
-      // Cache hit.
-      restored_from_closed_tab_cache = true;
-      web_contents = chrome::AddRestoredTabFromCache(
-          std::move(wc), browser_, tab_index, group, select, pin,
-          user_agent_override, extra_data);
-    }
-  }
-
-  if (!restored_from_closed_tab_cache) {
-    // Cache miss, ClosedTabCache feature disabled or non-existent |tab_id|.
     web_contents = chrome::AddRestoredTab(
         browser_, navigations, tab_index, selected_navigation, extension_app_id,
         group, select, pin, base::TimeTicks(), storage_namespace,
         user_agent_override, extra_data, false /* from_session_restore */);
-  }
+
 
   // Only update the metadata if the group doesn't already exist since the
   // existing group has the latest metadata, which may have changed from the
@@ -228,32 +234,33 @@ sessions::LiveTab* BrowserLiveTabContext::AddRestoredTab(
     group_model->GetTabGroup(group.value())->SetVisualData(new_data);
   }
 
-  if (!restored_from_closed_tab_cache) {
 #if BUILDFLAG(ENABLE_SESSION_SERVICE)
-    // The focused tab will be loaded by Browser, and TabLoader will load the
-    // rest.
-    if (!select) {
-      // Regression check: make sure that the tab hasn't started to load
-      // immediately.
-      DCHECK(web_contents->GetController().NeedsReload());
-      DCHECK(!web_contents->IsLoading());
-    }
-    std::vector<TabLoader::RestoredTab> restored_tabs;
-    restored_tabs.emplace_back(web_contents, select, !extension_app_id.empty(),
-                               pin, group);
-    TabLoader::RestoreTabs(restored_tabs, base::TimeTicks::Now());
-#else   // BUILDFLAG(ENABLE_SESSION_SERVICE)
-    // Load the tab manually if there is no TabLoader.
-    web_contents->GetController().LoadIfNecessary();
-#endif  // BUILDFLAG(ENABLE_SESSION_SERVICE)
+  // The tab may have been made active even if `select` is false if it is the
+  // only tab in `browser_`.
+  const bool is_active =
+      browser_->tab_strip_model()->GetActiveWebContents() == web_contents;
+  // The active tab will be loaded by Browser, and TabLoader will load the rest.
+  if (!is_active) {
+    // Regression check: make sure that the tab hasn't started to load
+    // immediately.
+    DCHECK(web_contents->GetController().NeedsReload());
+    DCHECK(!web_contents->IsLoading());
   }
+  std::vector<TabLoader::RestoredTab> restored_tabs;
+  restored_tabs.emplace_back(web_contents, is_active, !extension_app_id.empty(),
+                             pin, group);
+  TabLoader::RestoreTabs(restored_tabs, base::TimeTicks::Now());
+#else   // BUILDFLAG(ENABLE_SESSION_SERVICE)
+  // Load the tab manually if there is no TabLoader.
+  web_contents->GetController().LoadIfNecessary();
+#endif  // BUILDFLAG(ENABLE_SESSION_SERVICE)
 
   return sessions::ContentLiveTab::GetForWebContents(web_contents);
 }
 
 sessions::LiveTab* BrowserLiveTabContext::ReplaceRestoredTab(
     const std::vector<sessions::SerializedNavigationEntry>& navigations,
-    absl::optional<tab_groups::TabGroupId> group,
+    std::optional<tab_groups::TabGroupId> group,
     int selected_navigation,
     const std::string& extension_app_id,
     const sessions::PlatformSpecificTabData* tab_platform_data,
@@ -318,15 +325,19 @@ sessions::LiveTabContext* BrowserLiveTabContext::Create(
 // static
 sessions::LiveTabContext* BrowserLiveTabContext::FindContextForWebContents(
     const WebContents* contents) {
-  Browser* browser = chrome::FindBrowserWithWebContents(contents);
-  return browser ? browser->live_tab_context() : nullptr;
+  Browser* browser = chrome::FindBrowserWithTab(contents);
+  return browser && !browser->is_delete_scheduled()
+             ? browser->live_tab_context()
+             : nullptr;
 }
 
 // static
 sessions::LiveTabContext* BrowserLiveTabContext::FindContextWithID(
     SessionID desired_id) {
   Browser* browser = chrome::FindBrowserWithID(desired_id);
-  return browser ? browser->live_tab_context() : nullptr;
+  return browser && !browser->is_delete_scheduled()
+             ? browser->live_tab_context()
+             : nullptr;
 }
 
 // static
@@ -334,5 +345,7 @@ sessions::LiveTabContext* BrowserLiveTabContext::FindContextWithGroup(
     tab_groups::TabGroupId group,
     Profile* profile) {
   Browser* browser = chrome::FindBrowserWithGroup(group, profile);
-  return browser ? browser->live_tab_context() : nullptr;
+  return browser && !browser->is_delete_scheduled()
+             ? browser->live_tab_context()
+             : nullptr;
 }

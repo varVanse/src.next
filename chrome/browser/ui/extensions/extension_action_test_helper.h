@@ -21,7 +21,7 @@ class Image;
 class Size;
 }  // namespace gfx
 
-// TODO(https://crbug.com/1197766): A lot of this class can be cleaned up for
+// TODO(crbug.com/40177062): A lot of this class can be cleaned up for
 // the new toolbar UI. Some of it may also be removable, since we now have
 // the platform-abstract ExtensionsContainer class.
 class ExtensionActionTestHelper {
@@ -42,11 +42,6 @@ class ExtensionActionTestHelper {
   // Returns the number of browser action buttons in the window toolbar.
   virtual int NumberOfBrowserActions() = 0;
 
-  // Returns the number of browser action currently visible. Note that a correct
-  // result may require a UI layout. Ensure the UI layout is up-to-date (e.g. by
-  // calling InProcessBrowserTest::RunScheduledLayouts()) for a browser test.
-  virtual int VisibleBrowserActions() = 0;
-
   // Returns true if there is an action for the given `id`.
   virtual bool HasAction(const extensions::ExtensionId& id) = 0;
 
@@ -64,9 +59,6 @@ class ExtensionActionTestHelper {
   // Simulates a user click on the action button for the given `id`.
   virtual void Press(const extensions::ExtensionId& id) = 0;
 
-  // Returns the current tooltip of the action for the given `id`.
-  virtual std::string GetTooltip(const extensions::ExtensionId& id) = 0;
-
   virtual gfx::NativeView GetPopupNativeView() = 0;
 
   // Spins a RunLoop until the NativeWindow hosting |GetPopupNativeView()| is
@@ -81,25 +73,11 @@ class ExtensionActionTestHelper {
   // Hides the given popup and returns whether the hide was successful.
   virtual bool HidePopup() = 0;
 
-  // Sets the current width of the browser actions container without resizing
-  // the underlying controller. This is to simulate e.g. when the browser window
-  // is too small for the preferred width.
-  virtual void SetWidth(int width) = 0;
-
   // Returns the associated ExtensionsContainer.
   virtual ExtensionsContainer* GetExtensionsContainer() = 0;
 
   // Waits for the ExtensionContainer's layout to be done.
   virtual void WaitForExtensionsContainerLayout() = 0;
-
-  // Creates and returns a ExtensionActionTestHelper with an "overflow"
-  // container, with this object's container as the main bar.
-  virtual std::unique_ptr<ExtensionActionTestHelper> CreateOverflowBar(
-      Browser* browser) = 0;
-
-  // Forces a layout of an overflow bar. Must only be called on the helper
-  // returned by CreateOverflowBar().
-  virtual void LayoutForOverflowBar() = 0;
 
   // Returns the minimum allowed size of an extension popup.
   virtual gfx::Size GetMinPopupSize() = 0;

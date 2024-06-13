@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,9 +12,6 @@ namespace blink {
 class LayoutThemeWin final : public LayoutThemeDefault {
  public:
   static scoped_refptr<LayoutTheme> Create();
-
-  Color SystemColor(CSSValueID css_value_id,
-                    mojom::blink::ColorScheme color_scheme) const override;
 
   // TODO(crbug.com/1092093): Implement IsAccentColorCustomized and
   // GetAccentColor to support system accent colors in windows.

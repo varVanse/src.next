@@ -6,7 +6,7 @@
 
 #include <algorithm>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
 #include "base/logging.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/navigation_throttle.h"
@@ -48,13 +48,17 @@ bool ShouldAutoReload(content::NavigationHandle* handle) {
          handle->GetURL().SchemeIsHTTPOrHTTPS() &&
          // Don't auto reload if the error was a secure DNS network error, since
          // the reload may interfere with the captive portal probe state.
-         // TODO(crbug.com/1016164): Explore how to allow reloads for secure DNS
-         // network errors without interfering with the captive portal probe
+         // TODO(crbug.com/40104002): Explore how to allow reloads for secure
+         // DNS network errors without interfering with the captive portal probe
          // state.
          !handle->GetResolveErrorInfo().is_secure_network_error &&
          // Don't auto reload if the error is caused by the server returning a
          // non-2xx HTTP response code.
-         net_error != net::ERR_HTTP_RESPONSE_CODE_FAILURE;
+         net_error != net::ERR_HTTP_RESPONSE_CODE_FAILURE &&
+         // Do not auto-reload if the error is caused by private network access
+         // preflight failures because user reloads have different initiator
+         // policies.
+         net_error != net::ERR_BLOCKED_BY_PRIVATE_NETWORK_ACCESS_CHECKS;
 }
 
 base::TimeDelta GetNextReloadDelay(size_t reload_count) {

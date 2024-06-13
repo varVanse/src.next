@@ -50,7 +50,6 @@ void SandboxIPCHandler::Run() {
       PLOG(WARNING) << "poll";
       if (failed_polls++ == 3) {
         LOG(FATAL) << "poll(2) failing. SandboxIPCHandler aborting.";
-        return;
       }
       continue;
     }
@@ -89,7 +88,7 @@ void SandboxIPCHandler::HandleRequestFromChild(int fd) {
   // kMaxSandboxIPCMessagePayloadSize set to 64 should be plenty.
   // 128 bytes padding are necessary so recvmsg() does not return MSG_TRUNC
   // error for a maximum length message.
-  char buf[kMaxSandboxIPCMessagePayloadSize + 128];
+  uint8_t buf[kMaxSandboxIPCMessagePayloadSize + 128];
 
   const ssize_t len =
       base::UnixDomainSocket::RecvMsg(fd, buf, sizeof(buf), &fds);
@@ -107,7 +106,8 @@ void SandboxIPCHandler::HandleRequestFromChild(int fd) {
   if (fds.empty())
     return;
 
-  base::Pickle pickle(buf, len);
+  base::Pickle pickle = base::Pickle::WithUnownedBuffer(
+      base::span(buf, base::checked_cast<size_t>(len)));
   base::PickleIterator iter(pickle);
 
   int kind;
@@ -160,7 +160,7 @@ void SandboxIPCHandler::SendRendererReply(
     int reply_fd) {
   struct msghdr msg;
   memset(&msg, 0, sizeof(msg));
-  struct iovec iov = {const_cast<void*>(reply.data()), reply.size()};
+  struct iovec iov = {const_cast<uint8_t*>(reply.data()), reply.size()};
   msg.msg_iov = &iov;
   msg.msg_iovlen = 1;
 

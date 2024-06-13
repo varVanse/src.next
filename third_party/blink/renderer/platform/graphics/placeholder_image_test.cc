@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -116,20 +116,18 @@ void DrawImageExpectingIconOnly(PlaceholderImage& image,
 
 float GetExpectedPlaceholderTextWidth(const StringView& text,
                                       float scale_factor) {
+  scoped_refptr<SharedFontFamily> arial = SharedFontFamily::Create(
+      font_family_names::kArial, FontFamily::Type::kFamilyName);
+  scoped_refptr<SharedFontFamily> helvetica = SharedFontFamily::Create(
+      font_family_names::kHelvetica, FontFamily::Type::kFamilyName, arial);
+  scoped_refptr<SharedFontFamily> helvetica_neue =
+      SharedFontFamily::Create(font_family_names::kHelveticaNeue,
+                               FontFamily::Type::kFamilyName, helvetica);
+  FontFamily roboto(font_family_names::kRoboto, FontFamily::Type::kFamilyName,
+                    helvetica_neue);
+
   FontDescription description;
-  description.FirstFamily().SetFamily("Roboto", FontFamily::Type::kFamilyName);
-
-  scoped_refptr<SharedFontFamily> helvetica_neue = SharedFontFamily::Create();
-  helvetica_neue->SetFamily("Helvetica Neue", FontFamily::Type::kFamilyName);
-  scoped_refptr<SharedFontFamily> helvetica = SharedFontFamily::Create();
-  helvetica->SetFamily("Helvetica", FontFamily::Type::kFamilyName);
-  scoped_refptr<SharedFontFamily> arial = SharedFontFamily::Create();
-  arial->SetFamily("Arial", FontFamily::Type::kFamilyName);
-
-  helvetica->AppendFamily(std::move(arial));
-  helvetica_neue->AppendFamily(std::move(helvetica));
-  description.FirstFamily().AppendFamily(std::move(helvetica_neue));
-
+  description.SetFamily(roboto);
   description.SetGenericFamily(FontDescription::kSansSerifFamily);
   description.SetComputedSize(scale_factor * 14.0f);
   description.SetWeight(FontSelectionValue(500));
@@ -195,7 +193,7 @@ void DrawImageExpectingIconAndTextLTR(PlaceholderImage& image,
       .WillOnce(InvokeWithoutArgs([&image, scale_factor]() {
         EXPECT_NEAR(
             scale_factor * kBaseFontSize,
-            image.GetFontForTesting()->GetFontDescription().ComputedSize(),
+            image.GetFontForTesting().GetFontDescription().ComputedSize(),
             0.01);
       }));
 
@@ -236,7 +234,8 @@ class PlaceholderImageTest : public testing::Test {
  public:
   void SetUp() override {
     old_user_preferred_languages_ = UserPreferredLanguages();
-    OverrideUserPreferredLanguagesForTesting(Vector<AtomicString>(1U, "en-US"));
+    OverrideUserPreferredLanguagesForTesting(
+        Vector<AtomicString>(1U, AtomicString("en-US")));
   }
 
   void TearDown() override {
@@ -388,7 +387,8 @@ TEST_F(PlaceholderImageTest, DrawWithOriginalResourceSizeRTL) {
   expected_text.Ensure16Bit();
   EXPECT_EQ(expected_text, image->GetTextForTesting());
 
-  OverrideUserPreferredLanguagesForTesting(Vector<AtomicString>(1U, "ar"));
+  OverrideUserPreferredLanguagesForTesting(
+      Vector<AtomicString>(1U, AtomicString("ar")));
   EXPECT_TRUE(Locale::DefaultLocale().IsRTL());
 
   static constexpr float kScaleFactor = 2.0f;
@@ -449,7 +449,7 @@ TEST_F(PlaceholderImageTest, DrawWithOriginalResourceSizeRTL) {
       .WillOnce(InvokeWithoutArgs([image]() {
         EXPECT_NEAR(
             kScaleFactor * kBaseFontSize,
-            image->GetFontForTesting()->GetFontDescription().ComputedSize(),
+            image->GetFontForTesting().GetFontDescription().ComputedSize(),
             0.01);
       }));
 
