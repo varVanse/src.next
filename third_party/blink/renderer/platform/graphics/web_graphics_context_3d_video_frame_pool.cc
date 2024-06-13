@@ -1,25 +1,30 @@
-// Copyright 2021 The Chromium Authors. All rights reserved.
+// Copyright 2021 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/platform/graphics/web_graphics_context_3d_video_frame_pool.h"
 
 #include "base/feature_list.h"
-#include "base/system/sys_info.h"
-#include "build/build_config.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
+#include "base/trace_event/trace_event_impl.h"
 #include "components/viz/common/gpu/raster_context_provider.h"
 #include "gpu/GLES2/gl2extchromium.h"
+#include "gpu/command_buffer/client/client_shared_image.h"
 #include "gpu/command_buffer/client/context_support.h"
 #include "gpu/command_buffer/client/gpu_memory_buffer_manager.h"
 #include "gpu/command_buffer/client/raster_interface.h"
 #include "gpu/command_buffer/client/shared_image_interface.h"
+#include "gpu/command_buffer/common/shared_image_capabilities.h"
 #include "media/base/video_frame.h"
 #include "media/renderers/video_frame_rgba_to_yuva_converter.h"
 #include "media/video/gpu_video_accelerator_factories.h"
 #include "media/video/renderable_gpu_memory_buffer_video_frame_pool.h"
+#include "perfetto/tracing/track_event_args.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/renderer/platform/graphics/web_graphics_context_3d_provider_wrapper.h"
 #include "third_party/blink/renderer/platform/wtf/functional.h"
+#include "third_party/perfetto/include/perfetto/tracing/track.h"
 
 namespace blink {
 
@@ -42,29 +47,54 @@ class Context : public media::RenderableGpuMemoryBufferVideoFramePool::Context {
                : nullptr;
   }
 
-  void CreateSharedImage(gfx::GpuMemoryBuffer* gpu_memory_buffer,
-                         gfx::BufferPlane plane,
-                         const gfx::ColorSpace& color_space,
-                         GrSurfaceOrigin surface_origin,
-                         SkAlphaType alpha_type,
-                         uint32_t usage,
-                         gpu::Mailbox& mailbox,
-                         gpu::SyncToken& sync_token) override {
+  scoped_refptr<gpu::ClientSharedImage> CreateSharedImage(
+      gfx::GpuMemoryBuffer* gpu_memory_buffer,
+      const viz::SharedImageFormat& si_format,
+      const gfx::ColorSpace& color_space,
+      GrSurfaceOrigin surface_origin,
+      SkAlphaType alpha_type,
+      uint32_t usage,
+      gpu::SyncToken& sync_token) override {
     auto* sii = SharedImageInterface();
-    if (!sii || !gmb_manager_)
-      return;
-    mailbox =
-        sii->CreateSharedImage(gpu_memory_buffer, gmb_manager_, plane,
-                               color_space, surface_origin, alpha_type, usage);
+    if (!sii) {
+      return nullptr;
+    }
+    auto client_shared_image = sii->CreateSharedImage(
+        {si_format, gpu_memory_buffer->GetSize(), color_space, surface_origin,
+         alpha_type, usage, "WebGraphicsContext3DVideoFramePool"},
+        gpu_memory_buffer->CloneHandle());
+    CHECK(client_shared_image);
     sync_token = sii->GenVerifiedSyncToken();
+    return client_shared_image;
   }
 
-  void DestroySharedImage(const gpu::SyncToken& sync_token,
-                          const gpu::Mailbox& mailbox) override {
+  scoped_refptr<gpu::ClientSharedImage> CreateSharedImage(
+      gfx::GpuMemoryBuffer* gpu_memory_buffer,
+      gfx::BufferPlane plane,
+      const gfx::ColorSpace& color_space,
+      GrSurfaceOrigin surface_origin,
+      SkAlphaType alpha_type,
+      uint32_t usage,
+      gpu::SyncToken& sync_token) override {
+    auto* sii = SharedImageInterface();
+    if (!sii || !gmb_manager_)
+      return nullptr;
+    auto client_shared_image =
+        sii->CreateSharedImage(gpu_memory_buffer, gmb_manager_, plane,
+                               {color_space, surface_origin, alpha_type, usage,
+                                "WebGraphicsContext2DVideoFramePool"});
+    CHECK(client_shared_image);
+    sync_token = sii->GenVerifiedSyncToken();
+    return client_shared_image;
+  }
+
+  void DestroySharedImage(
+      const gpu::SyncToken& sync_token,
+      scoped_refptr<gpu::ClientSharedImage> shared_image) override {
     auto* sii = SharedImageInterface();
     if (!sii)
       return;
-    sii->DestroySharedImage(sync_token, mailbox);
+    sii->DestroySharedImage(sync_token, std::move(shared_image));
   }
 
  private:
@@ -79,7 +109,7 @@ class Context : public media::RenderableGpuMemoryBufferVideoFramePool::Context {
 
   base::WeakPtr<blink::WebGraphicsContext3DProviderWrapper>
       weak_context_provider_;
-  gpu::GpuMemoryBufferManager* gmb_manager_;
+  raw_ptr<gpu::GpuMemoryBufferManager> gmb_manager_;
 };
 
 }  // namespace
@@ -116,13 +146,17 @@ WebGraphicsContext3DVideoFramePool::GetRasterInterface() const {
 }
 
 bool WebGraphicsContext3DVideoFramePool::CopyRGBATextureToVideoFrame(
-    viz::ResourceFormat src_format,
+    viz::SharedImageFormat src_format,
     const gfx::Size& src_size,
     const gfx::ColorSpace& src_color_space,
     GrSurfaceOrigin src_surface_origin,
     const gpu::MailboxHolder& src_mailbox_holder,
     const gfx::ColorSpace& dst_color_space,
     FrameReadyCallback callback) {
+  TRACE_EVENT("media", "CopyRGBATextureToVideoFrame");
+  int flow_id = trace_flow_seqno_.GetNext();
+  TRACE_EVENT_INSTANT("media", "CopyRGBATextureToVideoFrame",
+                      perfetto::Flow::ProcessScoped(flow_id));
   if (!weak_context_provider_)
     return false;
   auto* context_provider = weak_context_provider_->ContextProvider();
@@ -135,8 +169,11 @@ bool WebGraphicsContext3DVideoFramePool::CopyRGBATextureToVideoFrame(
 #if BUILDFLAG(IS_WIN)
   // CopyRGBATextureToVideoFrame below needs D3D shared images on Windows so
   // early out before creating the GMB since it's going to fail anyway.
-  if (!context_provider->GetCapabilities().shared_image_d3d)
+  if (!context_provider->SharedImageInterface()
+           ->GetCapabilities()
+           .shared_image_d3d) {
     return false;
+  }
 #endif  // BUILDFLAG(IS_WIN)
 
   auto dst_frame = pool_->MaybeCreateVideoFrame(src_size, dst_color_space);
@@ -172,7 +209,7 @@ bool WebGraphicsContext3DVideoFramePool::CopyRGBATextureToVideoFrame(
   auto on_query_done_cb =
       [](scoped_refptr<media::VideoFrame> frame,
          base::WeakPtr<blink::WebGraphicsContext3DProviderWrapper> ctx_wrapper,
-         unsigned query_id, FrameReadyCallback callback) {
+         unsigned query_id, int flow_id, FrameReadyCallback callback) {
         if (ctx_wrapper) {
           if (auto* ctx_provider = ctx_wrapper->ContextProvider()) {
             if (auto* ri_provider = ctx_provider->RasterContextProvider()) {
@@ -181,6 +218,8 @@ bool WebGraphicsContext3DVideoFramePool::CopyRGBATextureToVideoFrame(
             }
           }
         }
+        TRACE_EVENT_INSTANT("media", "CopyRGBATextureToVideoFrame",
+                            perfetto::TerminatingFlow::ProcessScoped(flow_id));
         std::move(callback).Run(std::move(frame));
       };
 
@@ -189,7 +228,7 @@ bool WebGraphicsContext3DVideoFramePool::CopyRGBATextureToVideoFrame(
   context_support->SignalQuery(
       query_id,
       base::BindOnce(on_query_done_cb, dst_frame, weak_context_provider_,
-                     query_id, std::move(callback)));
+                     query_id, flow_id, std::move(callback)));
 
   return true;
 }
@@ -217,31 +256,14 @@ void ApplyMetadataAndRunCallback(
   std::move(orig_callback).Run(std::move(wrapped));
 }
 
-const base::Feature kGpuMemoryBufferReadbackFromTexture {
-  "GpuMemoryBufferReadbackFromTexture",
+BASE_FEATURE(kGpuMemoryBufferReadbackFromTexture,
+             "GpuMemoryBufferReadbackFromTexture",
 #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
-      base::FEATURE_ENABLED_BY_DEFAULT
+             base::FEATURE_ENABLED_BY_DEFAULT
 #else
-      base::FEATURE_DISABLED_BY_DEFAULT
+             base::FEATURE_DISABLED_BY_DEFAULT
 #endif
-};
-
-#if BUILDFLAG(IS_CHROMEOS) && defined(ARCH_CPU_ARM_FAMILY)
-bool IsRK3399Board() {
-  const std::string board = base::SysInfo::GetLsbReleaseBoard();
-  const char* kRK3399Boards[] = {
-      "bob",
-      "kevin",
-      "rainier",
-      "scarlet",
-  };
-  for (const char* b : kRK3399Boards) {
-    if (board.find(b) == 0u)  // if |board| starts with |b|.
-      return true;
-  }
-  return false;
-}
-#endif  // BUILDFLAG(IS_CHROMEOS) && defined(ARCH_CPU_ARM_FAMILY)
+);
 }  // namespace
 
 bool WebGraphicsContext3DVideoFramePool::ConvertVideoFrame(
@@ -255,19 +277,19 @@ bool WebGraphicsContext3DVideoFramePool::ConvertVideoFrame(
          format == media::PIXEL_FORMAT_ARGB)
       << "Invalid format " << format;
   DCHECK_EQ(src_video_frame->NumTextures(), std::size_t{1});
-  viz::ResourceFormat texture_format;
+  viz::SharedImageFormat texture_format;
   switch (format) {
     case media::PIXEL_FORMAT_XBGR:
-      texture_format = viz::RGBX_8888;
+      texture_format = viz::SinglePlaneFormat::kRGBX_8888;
       break;
     case media::PIXEL_FORMAT_ABGR:
-      texture_format = viz::RGBA_8888;
+      texture_format = viz::SinglePlaneFormat::kRGBA_8888;
       break;
     case media::PIXEL_FORMAT_XRGB:
-      texture_format = viz::BGRX_8888;
+      texture_format = viz::SinglePlaneFormat::kBGRX_8888;
       break;
     case media::PIXEL_FORMAT_ARGB:
-      texture_format = viz::BGRA_8888;
+      texture_format = viz::SinglePlaneFormat::kBGRA_8888;
       break;
     default:
       NOTREACHED();
@@ -281,21 +303,13 @@ bool WebGraphicsContext3DVideoFramePool::ConvertVideoFrame(
           ? kTopLeft_GrSurfaceOrigin
           : kBottomLeft_GrSurfaceOrigin,
       src_video_frame->mailbox_holder(0), dst_color_space,
-      WTF::Bind(ApplyMetadataAndRunCallback, src_video_frame,
-                std::move(callback)));
+      WTF::BindOnce(ApplyMetadataAndRunCallback, src_video_frame,
+                    std::move(callback)));
 }
 
 // static
 bool WebGraphicsContext3DVideoFramePool::
     IsGpuMemoryBufferReadbackFromTextureEnabled() {
-#if BUILDFLAG(IS_CHROMEOS) && defined(ARCH_CPU_ARM_FAMILY)
-  // The GL driver used on RK3399 has a problem to enable One copy canvas
-  // capture. See b/238144592.
-  // TODO(b/239503724): Remove this code when RK3399 reaches EOL.
-  if (IsRK3399Board())
-    return false;
-#endif  // BUILDFLAG(IS_CHROMEOS) && defined(ARCH_CPU_ARM_FAMILY)
-
   return base::FeatureList::IsEnabled(kGpuMemoryBufferReadbackFromTexture);
 }
 

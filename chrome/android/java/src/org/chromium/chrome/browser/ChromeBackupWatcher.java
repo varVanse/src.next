@@ -7,18 +7,19 @@ package org.chromium.chrome.browser;
 import android.app.backup.BackupManager;
 import android.content.Context;
 
-import androidx.annotation.VisibleForTesting;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
 
 import org.chromium.base.ContextUtils;
-import org.chromium.base.StrictModeContext;
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNINamespace;
+import org.chromium.base.shared_preferences.SharedPreferencesManager;
 import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
-import org.chromium.chrome.browser.preferences.SharedPreferencesManager;
-import org.chromium.chrome.browser.profiles.Profile;
+import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
+import org.chromium.chrome.browser.preferences.PrefChangeRegistrar;
+import org.chromium.chrome.browser.profiles.ProfileManager;
 import org.chromium.chrome.browser.signin.services.IdentityServicesProvider;
 import org.chromium.components.signin.identitymanager.IdentityManager;
 import org.chromium.components.signin.identitymanager.PrimaryAccountChangeEvent;
+import org.chromium.components.sync.internal.SyncPrefNames;
 
 /**
  * Class for watching for changes to the Android preferences that are backed up using Android
@@ -26,52 +27,65 @@ import org.chromium.components.signin.identitymanager.PrimaryAccountChangeEvent;
  */
 @JNINamespace("android")
 public class ChromeBackupWatcher {
-    private BackupManager mBackupManager;
+    private final BackupManager mBackupManager;
+    private final PrefChangeRegistrar mPrefChangeRegistrar;
 
-    @VisibleForTesting
+    // Suppress to observe SharedPreferences, which is discouraged; use another messaging channel
+    // instead.
+    @SuppressWarnings("UseSharedPreferencesManagerFromChromeCheck")
     @CalledByNative
-    static ChromeBackupWatcher createChromeBackupWatcher() {
-        return new ChromeBackupWatcher();
-    }
-
     private ChromeBackupWatcher() {
         Context context = ContextUtils.getApplicationContext();
-        if (context == null) return;
+        assert context != null;
 
         mBackupManager = new BackupManager(context);
         // Watch the Java preferences that are backed up.
-        SharedPreferencesManager sharedPrefs = SharedPreferencesManager.getInstance();
+        SharedPreferencesManager sharedPrefs = ChromeSharedPreferences.getInstance();
         // If we have never done a backup do one immediately.
         if (!sharedPrefs.readBoolean(ChromePreferenceKeys.BACKUP_FIRST_BACKUP_DONE, false)) {
-            try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {
-                mBackupManager.dataChanged();
-            }
+            mBackupManager.dataChanged();
             sharedPrefs.writeBoolean(ChromePreferenceKeys.BACKUP_FIRST_BACKUP_DONE, true);
         }
-        sharedPrefs.addObserver((key) -> {
-            // Update the backup if any of the backed up Android preferences change.
-            for (String pref : ChromeBackupAgentImpl.BACKUP_ANDROID_BOOL_PREFS) {
-                if (key.equals(pref)) {
-                    onBackupPrefsChanged();
-                    return;
-                }
-            }
-        });
+        ContextUtils.getAppSharedPreferences()
+                .registerOnSharedPreferenceChangeListener(
+                        (prefs, key) -> {
+                            // Update the backup if any of the backed up Android preferences change.
+                            for (String pref : ChromeBackupAgentImpl.BACKUP_ANDROID_BOOL_PREFS) {
+                                if (key.equals(pref)) {
+                                    onBackupPrefsChanged();
+                                    return;
+                                }
+                            }
+                        });
+
+        mPrefChangeRegistrar = new PrefChangeRegistrar();
+        for (String name : ChromeBackupAgentImpl.BACKUP_NATIVE_SYNC_TYPE_BOOL_PREFS) {
+            mPrefChangeRegistrar.addObserver(name, this::onBackupPrefsChanged);
+        }
+        mPrefChangeRegistrar.addObserver(
+                SyncPrefNames.SELECTED_TYPES_PER_ACCOUNT, this::onBackupPrefsChanged);
+
         // Update the backup if the sign-in status changes.
-        IdentityManager identityManager = IdentityServicesProvider.get().getIdentityManager(
-                Profile.getLastUsedRegularProfile());
-        identityManager.addObserver(new IdentityManager.Observer() {
-            @Override
-            public void onPrimaryAccountChanged(PrimaryAccountChangeEvent eventDetails) {
-                onBackupPrefsChanged();
-            }
-        });
+        IdentityManager identityManager =
+                IdentityServicesProvider.get()
+                        .getIdentityManager(ProfileManager.getLastUsedRegularProfile());
+        identityManager.addObserver(
+                new IdentityManager.Observer() {
+                    @Override
+                    public void onPrimaryAccountChanged(PrimaryAccountChangeEvent eventDetails) {
+                        onBackupPrefsChanged();
+                    }
+                });
     }
 
     @CalledByNative
+    private void destroy() {
+        assert mPrefChangeRegistrar != null;
+        mPrefChangeRegistrar.destroy();
+    }
+
     private void onBackupPrefsChanged() {
-        try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {
-            mBackupManager.dataChanged();
-        }
+        assert mBackupManager != null;
+        mBackupManager.dataChanged();
     }
 }

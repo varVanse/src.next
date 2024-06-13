@@ -9,7 +9,7 @@
 #include <memory>
 #include <set>
 
-#include "base/callback.h"
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
@@ -84,7 +84,8 @@ class ChromeAppIconService : public KeyedService,
 
   // System may have multiple icons for the same app id with different
   // dimensions. For example icon in shelf and app launcher.
-  using IconMap = std::map<std::string, std::set<ChromeAppIcon*>>;
+  using IconMap =
+      std::map<std::string, std::set<raw_ptr<ChromeAppIcon, SetExperimental>>>;
 
   // Called from ChromeAppIcon DTOR.
   void OnIconDestroyed(ChromeAppIcon* icon);

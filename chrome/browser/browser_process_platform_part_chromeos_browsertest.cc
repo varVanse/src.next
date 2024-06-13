@@ -9,7 +9,7 @@
 #include "build/build_config.h"
 #include "build/buildflag.h"
 #include "build/chromeos_buildflags.h"
-#include "chrome/browser/chromeos/app_mode/app_session.h"
+#include "chrome/browser/chromeos/app_mode/kiosk_browser_session.h"
 #include "chrome/browser/prefs/incognito_mode_prefs.h"
 #include "chrome/browser/prefs/session_startup_pref.h"
 #include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
@@ -25,8 +25,8 @@
 #include "chrome/browser/ui/browser_finder.h"
 #include "chrome/browser/ui/browser_list.h"
 #include "chrome/browser/ui/browser_window.h"
-#include "chrome/browser/ui/profile_picker.h"
-#include "chrome/browser/ui/profile_ui_test_utils.h"
+#include "chrome/browser/ui/profiles/profile_picker.h"
+#include "chrome/browser/ui/profiles/profile_ui_test_utils.h"
 #include "chrome/browser/ui/startup/startup_browser_creator.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/common/pref_names.h"
@@ -39,6 +39,7 @@
 #include "components/keep_alive_registry/scoped_keep_alive.h"
 #include "components/signin/public/base/signin_switches.h"
 #include "content/public/test/browser_test.h"
+#include "content/public/test/browser_test_utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/aura/window.h"
 #include "url/url_constants.h"
@@ -47,7 +48,7 @@ namespace {
 
 Browser* FindOneOtherBrowserForProfile(Profile* profile,
                                        Browser* not_this_browser) {
-  for (auto* browser : *BrowserList::GetInstance()) {
+  for (Browser* browser : *BrowserList::GetInstance()) {
     if (browser != not_this_browser && browser->profile() == profile)
       return browser;
   }
@@ -103,7 +104,8 @@ IN_PROC_BROWSER_TEST_F(BrowserProcessPlatformPartChromeOSBrowsertest,
   SessionStartupPref::SetStartupPref(profile, startup_pref);
 
   // Open a new window.
-  chrome::NewEmptyWindow(profile, /*should_trigger_session_restore=*/true);
+  ui_test_utils::OpenNewEmptyWindowAndWaitUntilSetAsLastActive(
+      profile, /*should_trigger_session_restore=*/true);
 
   // Startup URLs should not have been applied to the browser window.
   ASSERT_EQ(1u, chrome::GetBrowserCount(profile));
@@ -122,7 +124,7 @@ IN_PROC_BROWSER_TEST_F(BrowserProcessPlatformPartChromeOSBrowsertest,
   ASSERT_TRUE(embedded_test_server()->Start());
   const GURL original_url = embedded_test_server()->GetURL("/simple.html");
 
-  // Open |original_url| in a tab.
+  // Open `original_url` in a tab.
   TabStripModel* tab_strip_model = browser()->tab_strip_model();
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), original_url));
   ASSERT_EQ(1, tab_strip_model->count());
@@ -151,7 +153,7 @@ IN_PROC_BROWSER_TEST_F(BrowserProcessPlatformPartChromeOSBrowsertest,
   SessionStartupPref::SetStartupPref(profile, startup_pref);
 
   // Request a new browser window.
-  chrome::NewEmptyWindow(profile);
+  ui_test_utils::OpenNewEmptyWindowAndWaitUntilSetAsLastActive(profile);
 
   ASSERT_EQ(1u, chrome::GetBrowserCount(profile));
 
@@ -161,19 +163,18 @@ IN_PROC_BROWSER_TEST_F(BrowserProcessPlatformPartChromeOSBrowsertest,
   // Check pref_urls_opened_browser.
   EXPECT_NO_FATAL_FAILURE(WaitForLoadStopForBrowser(pref_urls_opened_browser));
   tab_strip_model = pref_urls_opened_browser->tab_strip_model();
-  EXPECT_EQ(4, tab_strip_model->GetTabCount());
+  EXPECT_EQ(3, tab_strip_model->GetTabCount());
   EXPECT_EQ(restore_url_1,
             tab_strip_model->GetWebContentsAt(0)->GetVisibleURL());
   EXPECT_EQ(restore_url_2,
             tab_strip_model->GetWebContentsAt(1)->GetVisibleURL());
   EXPECT_EQ(restore_url_3,
             tab_strip_model->GetWebContentsAt(2)->GetVisibleURL());
-  EXPECT_EQ(GURL(chrome::kChromeUINewTabURL),
-            tab_strip_model->GetWebContentsAt(3)->GetVisibleURL());
 
   // If there are existing open browsers opening a new browser should not
   // trigger a restore or open another window with startup URLs.
-  chrome::NewEmptyWindow(profile, /*should_trigger_session_restore=*/true);
+  ui_test_utils::OpenNewEmptyWindowAndWaitUntilSetAsLastActive(
+      profile, /*should_trigger_session_restore=*/true);
   ASSERT_EQ(2u, chrome::GetBrowserCount(profile));
   auto* new_browser = chrome::FindLastActiveWithProfile(profile);
   EXPECT_NO_FATAL_FAILURE(WaitForLoadStopForBrowser(new_browser));
@@ -190,7 +191,7 @@ IN_PROC_BROWSER_TEST_F(BrowserProcessPlatformPartChromeOSBrowsertest,
   ASSERT_TRUE(embedded_test_server()->Start());
   const GURL original_url = embedded_test_server()->GetURL("/simple.html");
 
-  // Open |original_url| in a tab.
+  // Open `original_url` in a tab.
   TabStripModel* tab_strip_model = browser()->tab_strip_model();
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), original_url));
   ASSERT_EQ(1, tab_strip_model->count());
@@ -219,12 +220,16 @@ IN_PROC_BROWSER_TEST_F(BrowserProcessPlatformPartChromeOSBrowsertest,
   SessionStartupPref::SetStartupPref(profile, startup_pref);
 
   // Request a new browser window.
+  ui_test_utils::BrowserChangeObserver new_browser_observer(
+      nullptr, ui_test_utils::BrowserChangeObserver::ChangeType::kAdded);
   chrome::NewEmptyWindow(profile);
 
   // This startup pref should restore a single window.
   base::RunLoop run_loop;
   testing::SessionsRestoredWaiter restore_waiter(run_loop.QuitClosure(), 1);
   run_loop.Run();
+
+  ui_test_utils::WaitForBrowserSetLastActive(new_browser_observer.Wait());
 
   ASSERT_EQ(2u, chrome::GetBrowserCount(profile));
 
@@ -255,9 +260,11 @@ IN_PROC_BROWSER_TEST_F(BrowserProcessPlatformPartChromeOSBrowsertest,
 
   // If there are existing open browsers opening a new browser should not
   // trigger a restore or open another window with last URLs.
-  chrome::NewEmptyWindow(profile, /*should_trigger_session_restore=*/true);
+  auto* new_browser =
+      ui_test_utils::OpenNewEmptyWindowAndWaitUntilSetAsLastActive(
+          profile, /*should_trigger_session_restore=*/true);
   ASSERT_EQ(3u, chrome::GetBrowserCount(profile));
-  auto* new_browser = chrome::FindLastActiveWithProfile(profile);
+  EXPECT_EQ(new_browser, chrome::FindLastActiveWithProfile(profile));
   EXPECT_NO_FATAL_FAILURE(WaitForLoadStopForBrowser(new_browser));
   tab_strip_model = new_browser->tab_strip_model();
   EXPECT_EQ(1, tab_strip_model->GetTabCount());
@@ -281,7 +288,7 @@ IN_PROC_BROWSER_TEST_F(BrowserProcessPlatformPartChromeOSBrowsertest,
   // Initial browser will be navigated to original_url.
   const GURL original_url = embedded_test_server()->GetURL("/simple.html");
 
-  // Open |original_url| in a tab for profile_urls's browser.
+  // Open `original_url` in a tab for profile_urls's browser.
   auto* profile_urls = browser()->profile();
   profile_urls->GetPrefs()->SetBoolean(prefs::kHasSeenWelcomePage, true);
   TabStripModel* tab_strip_model = browser()->tab_strip_model();
@@ -300,7 +307,7 @@ IN_PROC_BROWSER_TEST_F(BrowserProcessPlatformPartChromeOSBrowsertest,
   profile_last_and_urls->GetPrefs()->SetBoolean(prefs::kHasSeenWelcomePage,
                                                 true);
 
-  // Open |original_url| in a tab for profile_last_and_urls's browser.
+  // Open `original_url` in a tab for profile_last_and_urls's browser.
   Browser* new_browser = Browser::Create(
       Browser::CreateParams(Browser::TYPE_NORMAL, profile_last_and_urls, true));
   chrome::NewTab(new_browser);
@@ -356,23 +363,21 @@ IN_PROC_BROWSER_TEST_F(BrowserProcessPlatformPartChromeOSBrowsertest,
     EXPECT_NO_FATAL_FAILURE(
         WaitForLoadStopForBrowser(pref_urls_opened_browser));
     tab_strip_model = pref_urls_opened_browser->tab_strip_model();
-    EXPECT_EQ(4, tab_strip_model->GetTabCount());
+    EXPECT_EQ(3, tab_strip_model->GetTabCount());
     EXPECT_EQ(restore_url_1,
               tab_strip_model->GetWebContentsAt(0)->GetVisibleURL());
     EXPECT_EQ(restore_url_2,
               tab_strip_model->GetWebContentsAt(1)->GetVisibleURL());
     EXPECT_EQ(restore_url_3,
               tab_strip_model->GetWebContentsAt(2)->GetVisibleURL());
-    EXPECT_EQ(GURL(chrome::kChromeUINewTabURL),
-              tab_strip_model->GetWebContentsAt(3)->GetVisibleURL());
 
     // If there are existing open browsers opening a new browser should not
     // trigger a restore or open another window with startup URLs.
-    chrome::NewEmptyWindow(profile_urls);
+    ui_test_utils::OpenNewEmptyWindowAndWaitUntilSetAsLastActive(profile_urls);
     ASSERT_EQ(2u, chrome::GetBrowserCount(profile_urls));
-    auto* new_browser = chrome::FindLastActiveWithProfile(profile_urls);
-    EXPECT_NO_FATAL_FAILURE(WaitForLoadStopForBrowser(new_browser));
-    tab_strip_model = new_browser->tab_strip_model();
+    auto* last_active_browser = chrome::FindLastActiveWithProfile(profile_urls);
+    EXPECT_NO_FATAL_FAILURE(WaitForLoadStopForBrowser(last_active_browser));
+    tab_strip_model = last_active_browser->tab_strip_model();
     EXPECT_EQ(1, tab_strip_model->GetTabCount());
     EXPECT_EQ(GURL(chrome::kChromeUINewTabURL),
               tab_strip_model->GetWebContentsAt(0)->GetVisibleURL());
@@ -383,12 +388,16 @@ IN_PROC_BROWSER_TEST_F(BrowserProcessPlatformPartChromeOSBrowsertest,
   // expected.
   {
     // Request a new browser window.
+    ui_test_utils::BrowserChangeObserver restore_browser_observer(
+        nullptr, ui_test_utils::BrowserChangeObserver::ChangeType::kAdded);
     chrome::NewEmptyWindow(profile_last_and_urls);
 
     // This startup pref should restore a single window.
     base::RunLoop run_loop;
     testing::SessionsRestoredWaiter restore_waiter(run_loop.QuitClosure(), 1);
     run_loop.Run();
+
+    ui_test_utils::WaitForBrowserSetLastActive(restore_browser_observer.Wait());
 
     ASSERT_EQ(2u, chrome::GetBrowserCount(profile_urls));
     ASSERT_EQ(2u, chrome::GetBrowserCount(profile_last_and_urls));
@@ -420,12 +429,13 @@ IN_PROC_BROWSER_TEST_F(BrowserProcessPlatformPartChromeOSBrowsertest,
 
     // If there are existing open browsers opening a new browser should not
     // trigger a restore or open another window with last URLs.
-    chrome::NewEmptyWindow(profile_last_and_urls);
+    ui_test_utils::OpenNewEmptyWindowAndWaitUntilSetAsLastActive(
+        profile_last_and_urls);
     ASSERT_EQ(3u, chrome::GetBrowserCount(profile_last_and_urls));
-    auto* new_browser =
+    auto* last_active_browser =
         chrome::FindLastActiveWithProfile(profile_last_and_urls);
-    EXPECT_NO_FATAL_FAILURE(WaitForLoadStopForBrowser(new_browser));
-    tab_strip_model = new_browser->tab_strip_model();
+    EXPECT_NO_FATAL_FAILURE(WaitForLoadStopForBrowser(last_active_browser));
+    tab_strip_model = last_active_browser->tab_strip_model();
     EXPECT_EQ(1, tab_strip_model->GetTabCount());
     EXPECT_EQ(GURL(chrome::kChromeUINewTabURL),
               tab_strip_model->GetWebContentsAt(0)->GetVisibleURL());

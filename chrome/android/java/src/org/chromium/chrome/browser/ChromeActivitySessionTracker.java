@@ -10,7 +10,6 @@ import android.provider.Settings;
 import android.text.TextUtils;
 
 import androidx.annotation.Nullable;
-import androidx.annotation.VisibleForTesting;
 
 import org.chromium.base.ApplicationState;
 import org.chromium.base.ApplicationStatus;
@@ -32,13 +31,15 @@ import org.chromium.chrome.browser.notifications.NotificationPlatformBridge;
 import org.chromium.chrome.browser.partnercustomizations.PartnerBrowserCustomizations;
 import org.chromium.chrome.browser.password_manager.PasswordManagerLifecycleHelper;
 import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
+import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
 import org.chromium.chrome.browser.preferences.Pref;
-import org.chromium.chrome.browser.preferences.SharedPreferencesManager;
 import org.chromium.chrome.browser.profiles.Profile;
+import org.chromium.chrome.browser.profiles.ProfileManager;
 import org.chromium.chrome.browser.profiles.ProfileManagerUtils;
-import org.chromium.chrome.browser.read_later.ReadingListBridge;
+import org.chromium.chrome.browser.safety_hub.SafetyHubFetchService;
 import org.chromium.chrome.browser.tabmodel.TabModelSelector;
 import org.chromium.chrome.browser.translate.TranslateBridge;
+import org.chromium.components.browser_ui.accessibility.DeviceAccessibilitySettingsHandler;
 import org.chromium.components.browser_ui.accessibility.FontSizePrefs;
 import org.chromium.components.browser_ui.share.ShareImageFileUtils;
 import org.chromium.components.feature_engagement.EventConstants;
@@ -48,20 +49,19 @@ import org.chromium.components.user_prefs.UserPrefs;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * Tracks the foreground session state for the Chrome activities.
- */
+/** Tracks the foreground session state for the Chrome activities. */
 public class ChromeActivitySessionTracker {
 
     @SuppressLint("StaticFieldLeak")
     private static ChromeActivitySessionTracker sInstance;
 
-    private final PowerBroadcastReceiver mPowerBroadcastReceiver = new PowerBroadcastReceiver();
+    private final OmahaServiceStartDelayer mOmahaServiceStartDelayer =
+            new OmahaServiceStartDelayer();
     private final Map<Activity, Supplier<TabModelSelector>> mTabModelSelectorSuppliers =
             new HashMap<>();
 
     // Used to trigger variation changes (such as seed fetches) upon application foregrounding.
-    private VariationsSession mVariationsSession;
+    private final VariationsSession mVariationsSession;
 
     private boolean mIsInitialized;
     private boolean mIsStarted;
@@ -114,14 +114,11 @@ public class ChromeActivitySessionTracker {
     /**
      * @return The latest country according to the current variations state. Null if not available.
      */
-    @Nullable
-    public String getVariationsLatestCountry() {
+    public @Nullable String getVariationsLatestCountry() {
         return mVariationsSession.getLatestCountry();
     }
 
-    /**
-     * Handle any initialization that occurs once native has been loaded.
-     */
+    /** Handle any initialization that occurs once native has been loaded. */
     public void initializeWithNative() {
         ThreadUtils.assertOnUiThread();
 
@@ -158,23 +155,25 @@ public class ChromeActivitySessionTracker {
      * activity.
      */
     private void onForegroundSessionStart() {
-        try (TraceEvent te = TraceEvent.scoped(
-                     "ChromeActivitySessionTracker.onForegroundSessionStart")) {
-            UmaUtils.recordForegroundStartTime();
+        try (TraceEvent te =
+                TraceEvent.scoped("ChromeActivitySessionTracker.onForegroundSessionStart")) {
+            UmaUtils.recordForegroundStartTimeWithNative();
             updatePasswordEchoState();
-            FontSizePrefs.getInstance(Profile.getLastUsedRegularProfile())
-                    .onSystemFontScaleChanged();
+            Profile profile = ProfileManager.getLastUsedRegularProfile();
+            FontSizePrefs.getInstance(profile).onSystemFontScaleChanged();
+            DeviceAccessibilitySettingsHandler.getInstance(profile).updateFontWeightAdjustment();
             ChromeLocalizationUtils.recordUiLanguageStatus();
-            updateAcceptLanguages();
+            updateAcceptLanguages(profile);
             mVariationsSession.start();
-            mPowerBroadcastReceiver.onForegroundSessionStart();
+            mOmahaServiceStartDelayer.onForegroundSessionStart();
             AppHooks.get().getChimeDelegate().startSession();
-            ReadingListBridge.onStartChromeForeground();
             PasswordManagerLifecycleHelper.getInstance().onStartForegroundSession();
+            SafetyHubFetchService.onForegroundSessionStart();
 
             // Track the ratio of Chrome startups that are caused by notification clicks.
             // TODO(johnme): Add other reasons (and switch to recordEnumeratedHistogram).
-            RecordHistogram.recordBooleanHistogram("Startup.BringToForegroundReason",
+            RecordHistogram.recordBooleanHistogram(
+                    "Startup.BringToForegroundReason",
                     NotificationPlatformBridge.wasNotificationRecentlyClicked());
         }
     }
@@ -187,24 +186,16 @@ public class ChromeActivitySessionTracker {
      */
     private void onForegroundSessionEnd() {
         if (!mIsStarted) return;
-        UmaUtils.recordBackgroundTime();
+        UmaUtils.recordBackgroundTimeWithNative();
         ProfileManagerUtils.flushPersistentDataForAllProfiles();
         mIsStarted = false;
-        mPowerBroadcastReceiver.onForegroundSessionEnd();
+        mOmahaServiceStartDelayer.onForegroundSessionEnd();
 
         IntentHandler.clearPendingReferrer();
         IntentHandler.clearPendingIncognitoUrl();
 
-        int totalTabCount = 0;
-        for (Activity activity : ApplicationStatus.getRunningActivities()) {
-            Supplier<TabModelSelector> tabModelSelectorSupplier =
-                    mTabModelSelectorSuppliers.get(activity);
-            if (tabModelSelectorSupplier == null || !tabModelSelectorSupplier.hasValue()) continue;
-            totalTabCount += tabModelSelectorSupplier.get().getTotalTabCount();
-        }
-        RecordHistogram.recordCount1MHistogram("Tab.TotalTabCount.BeforeLeavingApp", totalTabCount);
-
-        Tracker tracker = TrackerFactory.getTrackerForProfile(Profile.getLastUsedRegularProfile());
+        Tracker tracker =
+                TrackerFactory.getTrackerForProfile(ProfileManager.getLastUsedRegularProfile());
         tracker.notifyEvent(EventConstants.FOREGROUND_SESSION_DESTROYED);
     }
 
@@ -228,26 +219,28 @@ public class ChromeActivitySessionTracker {
 
     /**
      * Update the accept languages after changing Android locale setting. Doing so kills the
-     * Activities but it doesn't kill the Application, so this should be called in
-     * {@link #onStart} instead of {@link #initialize}.
+     * Activities but it doesn't kill the Application, so this should be called in {@link #onStart}
+     * instead of {@link #initialize}.
      */
-    private void updateAcceptLanguages() {
+    private void updateAcceptLanguages(Profile profile) {
         String currentLocale = LocaleUtils.getDefaultLocaleListString();
-        String previousLocale = SharedPreferencesManager.getInstance().readString(
-                ChromePreferenceKeys.APP_LOCALE, null);
+        String previousLocale =
+                ChromeSharedPreferences.getInstance()
+                        .readString(ChromePreferenceKeys.APP_LOCALE, null);
         ChromeLocalizationUtils.recordLocaleUpdateStatus(previousLocale, currentLocale);
         if (!TextUtils.equals(previousLocale, currentLocale)) {
-            SharedPreferencesManager.getInstance().writeString(
-                    ChromePreferenceKeys.APP_LOCALE, currentLocale);
-            TranslateBridge.resetAcceptLanguages(currentLocale);
+            ChromeSharedPreferences.getInstance()
+                    .writeString(ChromePreferenceKeys.APP_LOCALE, currentLocale);
+            TranslateBridge.resetAcceptLanguages(profile, currentLocale);
             if (previousLocale != null) {
                 // Clear cache so that accept-languages change can be applied immediately.
                 // TODO(changwan): The underlying BrowsingDataRemover::Remove() is an asynchronous
                 // call. So cache-clearing may not be effective if URL rendering can happen before
                 // OnBrowsingDataRemoverDone() is called, in which case we may have to reload as
                 // well. Check if it can happen.
-                BrowsingDataBridge.getInstance().clearBrowsingData(
-                        null, new int[] {BrowsingDataType.CACHE}, TimePeriod.ALL_TIME);
+                BrowsingDataBridge.getForProfile(profile)
+                        .clearBrowsingData(
+                                null, new int[] {BrowsingDataType.CACHE}, TimePeriod.ALL_TIME);
             }
         }
     }
@@ -258,24 +251,25 @@ public class ChromeActivitySessionTracker {
      */
     private void updatePasswordEchoState() {
         boolean systemEnabled =
-                Settings.System.getInt(ContextUtils.getApplicationContext().getContentResolver(),
-                        Settings.System.TEXT_SHOW_PASSWORD, 1)
-                == 1;
-        if (UserPrefs.get(Profile.getLastUsedRegularProfile())
+                Settings.System.getInt(
+                                ContextUtils.getApplicationContext().getContentResolver(),
+                                Settings.System.TEXT_SHOW_PASSWORD,
+                                1)
+                        == 1;
+        if (UserPrefs.get(ProfileManager.getLastUsedRegularProfile())
                         .getBoolean(Pref.WEB_KIT_PASSWORD_ECHO_ENABLED)
                 == systemEnabled) {
             return;
         }
 
-        UserPrefs.get(Profile.getLastUsedRegularProfile())
+        UserPrefs.get(ProfileManager.getLastUsedRegularProfile())
                 .setBoolean(Pref.WEB_KIT_PASSWORD_ECHO_ENABLED, systemEnabled);
     }
 
     /**
-     * @return The PowerBroadcastReceiver for the browser process.
+     * @return The {@link OmahaServiceStartDelayer} for the browser process.
      */
-    @VisibleForTesting
-    public PowerBroadcastReceiver getPowerBroadcastReceiverForTesting() {
-        return mPowerBroadcastReceiver;
+    public OmahaServiceStartDelayer getOmahaServiceStartDelayerForTesting() {
+        return mOmahaServiceStartDelayer;
     }
 }

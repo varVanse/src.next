@@ -4,8 +4,9 @@
 
 #include "chrome/browser/extensions/chrome_app_icon_service.h"
 
-#include "base/bind.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
+#include "base/task/single_thread_task_runner.h"
 #include "build/chromeos_buildflags.h"
 #include "chrome/browser/extensions/chrome_app_icon.h"
 #include "chrome/browser/extensions/chrome_app_icon_service_factory.h"
@@ -89,8 +90,9 @@ void ChromeAppIconService::OnAppUpdated(const std::string& app_id) {
   if (it == icon_map_.end())
     return;
   // Set can be updated during the UpdateIcon call.
-  const std::set<ChromeAppIcon*> icons_to_update = it->second;
-  for (auto* icon : icons_to_update) {
+  const std::set<raw_ptr<ChromeAppIcon, SetExperimental>> icons_to_update =
+      it->second;
+  for (ChromeAppIcon* icon : icons_to_update) {
     if (it->second.count(icon))
       icon->UpdateIcon();
   }
@@ -102,7 +104,7 @@ void ChromeAppIconService::OnIconDestroyed(ChromeAppIcon* icon) {
   DCHECK(it != icon_map_.end());
   it->second.erase(icon);
   if (it->second.empty()) {
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE,
         base::BindOnce(&ChromeAppIconService::MaybeCleanupIconSet,
                        weak_ptr_factory_.GetWeakPtr(), icon->app_id()));

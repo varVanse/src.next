@@ -10,11 +10,11 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/strings/string_piece.h"
 #include "base/time/time.h"
 #include "crypto/ec_private_key.h"
 #include "net/base/completion_once_callback.h"
@@ -33,8 +33,6 @@ struct HttpRequestInfo;
 class HttpRequestHeaders;
 class HttpResponseInfo;
 class IOBuffer;
-class SSLCertRequestInfo;
-class SSLInfo;
 class StreamSocket;
 class UploadDataStream;
 
@@ -110,10 +108,6 @@ class NET_EXPORT_PRIVATE HttpStreamParser {
   }
   base::TimeTicks first_early_hints_time() { return first_early_hints_time_; }
 
-  void GetSSLInfo(SSLInfo* ssl_info);
-
-  void GetSSLCertRequestInfo(SSLCertRequestInfo* cert_request_info);
-
   // Encodes the given |payload| in the chunked format to |output|.
   // Returns the number of bytes written to |output|. |output_size| should
   // be large enough to store the encoded chunk, which is payload.size() +
@@ -122,7 +116,7 @@ class NET_EXPORT_PRIVATE HttpStreamParser {
   //
   // The output will look like: "HEX\r\n[payload]\r\n"
   // where HEX is a length in hexdecimal (without the "0x" prefix).
-  static int EncodeChunk(const base::StringPiece& payload,
+  static int EncodeChunk(std::string_view payload,
                          char* output,
                          size_t output_size);
 
@@ -217,7 +211,7 @@ class NET_EXPORT_PRIVATE HttpStreamParser {
   State io_state_ = STATE_NONE;
 
   // Null when read state machine is invoked.
-  raw_ptr<const HttpRequestInfo, DanglingUntriaged> request_;
+  raw_ptr<const HttpRequestInfo, AcrossTasksDanglingUntriaged> request_;
 
   // The request header data.  May include a merged request body.
   scoped_refptr<DrainableIOBuffer> request_headers_;
@@ -249,7 +243,7 @@ class NET_EXPORT_PRIVATE HttpStreamParser {
   // cannot be safely accessed after reading the final set of headers, as the
   // caller of SendRequest may have been destroyed - this happens in the case an
   // HttpResponseBodyDrainer is used.
-  raw_ptr<HttpResponseInfo, DanglingUntriaged> response_ = nullptr;
+  raw_ptr<HttpResponseInfo, AcrossTasksDanglingUntriaged> response_ = nullptr;
 
   // Time at which the first bytes of the first header response including
   // informational responses (1xx) are about to be parsed. This corresponds to
@@ -304,7 +298,7 @@ class NET_EXPORT_PRIVATE HttpStreamParser {
   // The underlying socket, owned by the caller. The HttpStreamParser must be
   // destroyed before the caller destroys the socket, or relinquishes ownership
   // of it.
-  raw_ptr<StreamSocket, DanglingUntriaged> stream_socket_;
+  raw_ptr<StreamSocket> stream_socket_;
 
   // Whether the socket has already been used. Only used in HTTP/0.9 detection
   // logic.
@@ -321,6 +315,12 @@ class NET_EXPORT_PRIVATE HttpStreamParser {
   // |request_body_read_buf_| unless the data is chunked.
   scoped_refptr<SeekableIOBuffer> request_body_send_buf_;
   bool sent_last_chunk_ = false;
+
+  // Whether the Content-Length was known and extra data was discarded.
+  bool discarded_extra_data_ = false;
+
+  // Whether the response body should be truncated to the Content-Length.
+  const bool truncate_to_content_length_enabled_;
 
   // Error received when uploading the body, if any.
   int upload_error_ = OK;

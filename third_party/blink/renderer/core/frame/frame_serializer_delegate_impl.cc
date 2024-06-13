@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors. All rights reserved.
+// Copyright 2020 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -42,15 +42,20 @@ namespace blink {
 namespace {
 
 const int kPopupOverlayZIndexThreshold = 50;
+// Note that this is *not* the open web's declarative shadow DOM attribute,
+// which is <template shadowrootmode>. This is a special attribute used by
+// MHTML archive files to represent shadow roots.
 const char kShadowModeAttributeName[] = "shadowmode";
 const char kShadowDelegatesFocusAttributeName[] = "shadowdelegatesfocus";
 
 }  // namespace
 
+using mojom::blink::FormControlType;
+
 // static
 String FrameSerializerDelegateImpl::GetContentID(Frame* frame) {
   DCHECK(frame);
-  String frame_id = String(frame->ToTraceValue().data());
+  String frame_id = String(frame->GetFrameIdForTracing().data());
   return "<frame-" + frame_id + "@mhtml.blink>";
 }
 
@@ -96,8 +101,8 @@ bool FrameSerializerDelegateImpl::ShouldIgnoreHiddenElement(
 
   // Do not include the hidden form element.
   auto* html_element_element = DynamicTo<HTMLInputElement>(&element);
-  return html_element_element &&
-         html_element_element->type() == input_type_names::kHidden;
+  return html_element_element && html_element_element->FormControlType() ==
+                                     FormControlType::kInputHidden;
 }
 
 bool FrameSerializerDelegateImpl::ShouldIgnoreMetaElement(
@@ -136,9 +141,10 @@ bool FrameSerializerDelegateImpl::ShouldIgnorePopupOverlayElement(
     center_y = page->GetChromeClient().WindowToViewportScalar(
         window->GetFrame(), center_y);
   }
-  LayoutPoint center_point(center_x, center_y);
-  if (!box->FrameRect().Contains(center_point))
+  if (!PhysicalRect(box->PhysicalLocation(), box->Size())
+           .Contains(LayoutUnit(center_x), LayoutUnit(center_y))) {
     return false;
+  }
 
   // The z-index should be greater than the threshold.
   if (box->Style()->EffectiveZIndex() < kPopupOverlayZIndexThreshold)
@@ -232,10 +238,6 @@ Vector<Attribute> FrameSerializerDelegateImpl::GetCustomAttributes(
   return attributes;
 }
 
-bool FrameSerializerDelegateImpl::ShouldCollectProblemMetric() {
-  return web_delegate_.UsePageProblemDetectors();
-}
-
 void FrameSerializerDelegateImpl::GetCustomAttributesForImageElement(
     const HTMLImageElement& element,
     Vector<Attribute>* attributes) {
@@ -275,41 +277,30 @@ void FrameSerializerDelegateImpl::GetCustomAttributesForImageElement(
   attributes->push_back(height_attribute);
 }
 
-std::pair<Node*, Element*> FrameSerializerDelegateImpl::GetAuxiliaryDOMTree(
-    const Element& element) const {
+std::pair<ShadowRoot*, HTMLTemplateElement*>
+FrameSerializerDelegateImpl::GetShadowTree(const Element& element) const {
   ShadowRoot* shadow_root = element.GetShadowRoot();
-  if (!shadow_root)
-    return std::pair<Node*, Element*>();
-
-  String shadow_mode;
-  switch (shadow_root->GetType()) {
-    case ShadowRootType::kUserAgent:
-      // No need to serialize.
-      return std::pair<Node*, Element*>();
-    case ShadowRootType::kOpen:
-      shadow_mode = "open";
-      break;
-    case ShadowRootType::kClosed:
-      shadow_mode = "closed";
-      break;
+  if (!shadow_root || shadow_root->GetMode() == ShadowRootMode::kUserAgent) {
+    return std::pair<ShadowRoot*, HTMLTemplateElement*>();
   }
 
   // Put the shadow DOM content inside a template element. A special attribute
   // is set to tell the mode of the shadow DOM.
-  auto* template_element = MakeGarbageCollected<Element>(
-      html_names::kTemplateTag, &(element.GetDocument()));
+  HTMLTemplateElement* template_element =
+      MakeGarbageCollected<HTMLTemplateElement>(element.GetDocument());
   template_element->setAttribute(
-      QualifiedName(g_null_atom, kShadowModeAttributeName, g_null_atom),
-      AtomicString(shadow_mode));
+      QualifiedName(AtomicString(kShadowModeAttributeName)),
+      AtomicString(shadow_root->GetMode() == ShadowRootMode::kOpen ? "open"
+                                                                   : "closed"));
   if (shadow_root->delegatesFocus()) {
     template_element->setAttribute(
-        QualifiedName(g_null_atom, kShadowDelegatesFocusAttributeName,
-                      g_null_atom),
+        QualifiedName(AtomicString(kShadowDelegatesFocusAttributeName)),
         g_empty_atom);
   }
   shadow_template_elements_.insert(template_element);
 
-  return std::pair<Node*, Element*>(shadow_root, template_element);
+  return std::pair<ShadowRoot*, HTMLTemplateElement*>(shadow_root,
+                                                      template_element);
 }
 
 }  // namespace blink

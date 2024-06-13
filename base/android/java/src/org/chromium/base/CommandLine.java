@@ -5,13 +5,12 @@
 package org.chromium.base;
 
 import android.text.TextUtils;
-import android.util.Log;
 
 import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 
-import org.chromium.base.annotations.NativeMethods;
-import org.chromium.build.annotations.MainDex;
+import org.jni_zero.JniType;
+import org.jni_zero.NativeMethods;
 
 import java.io.File;
 import java.io.FileReader;
@@ -23,12 +22,10 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Java mirror of base/command_line.h.
- * Android applications don't have command line arguments. Instead, they're "simulated" by reading a
- * file at a specific location early during startup. Applications each define their own files, e.g.,
- * ContentShellApplication.COMMAND_LINE_FILE.
-**/
-@MainDex
+ * Java mirror of base/command_line.h. Android applications don't have command line arguments.
+ * Instead, they're "simulated" by reading a file at a specific location early during startup.
+ * Applications each define their own files, e.g., ContentShellApplication.COMMAND_LINE_FILE.
+ */
 public abstract class CommandLine {
     // Public abstract interface, implemented in derived classes.
     // All these methods reflect their native-side counterparts.
@@ -40,14 +37,16 @@ public abstract class CommandLine {
 
     /**
      * Return the value associated with the given switch, or null.
+     *
      * @param switchString The switch key to lookup. It should NOT start with '--' !
      * @return switch value, or null if the switch is not set or set to empty.
      */
-    public abstract String getSwitchValue(String switchString);
+    public abstract @Nullable String getSwitchValue(String switchString);
 
     /**
-     * Return the value associated with the given switch, or {@code defaultValue} if the switch
-     * was not specified.
+     * Return the value associated with the given switch, or {@code defaultValue} if the switch was
+     * not specified.
+     *
      * @param switchString The switch key to lookup. It should NOT start with '--' !
      * @param defaultValue The default value to return if the switch isn't set.
      * @return Switch value, or {@code defaultValue} if the switch is not set or set to empty.
@@ -57,9 +56,7 @@ public abstract class CommandLine {
         return TextUtils.isEmpty(value) ? defaultValue : value;
     }
 
-    /**
-     * Return a copy of all switches, along with their values.
-     */
+    /** Return a copy of all switches, along with their values. */
     public abstract Map getSwitches();
 
     /**
@@ -146,15 +143,20 @@ public abstract class CommandLine {
      */
     public static void initFromFile(String file) {
         char[] buffer = readFileAsUtf8(file);
-        init(buffer == null ? null : tokenizeQuotedArguments(buffer));
+        String[] tokenized = buffer == null ? null : tokenizeQuotedArguments(buffer);
+        init(tokenized);
+        // The file existed, which should never be the case under normal operation.
+        // Use a log message to help with debugging if it's the flags that are causing issues.
+        if (tokenized != null) {
+            Log.i(TAG, "COMMAND-LINE FLAGS: %s (from %s)", Arrays.toString(tokenized), file);
+        }
     }
 
     /**
      * Resets both the java proxy and the native command lines. This allows the entire
      * command line initialization to be re-run including the call to onJniLoaded.
      */
-    @VisibleForTesting
-    public static void reset() {
+    static void resetForTesting() {
         setInstance(null);
     }
 
@@ -168,8 +170,8 @@ public abstract class CommandLine {
      */
     @VisibleForTesting
     static String[] tokenizeQuotedArguments(char[] buffer) {
-        // Just field trials can take up to 10K of command line.
-        if (buffer.length > 64 * 1024) {
+        // Just field trials can take over 60K of command line.
+        if (buffer.length > 96 * 1024) {
             // Check that our test runners are setting a reasonable number of flags.
             throw new RuntimeException("Flags file too big: " + buffer.length);
         }
@@ -202,7 +204,7 @@ public abstract class CommandLine {
         }
         if (arg != null) {
             if (currentQuote != noQuote) {
-                Log.w(TAG, "Unterminated quoted string: " + arg);
+                Log.w(TAG, "Unterminated quoted string: %s", arg);
             }
             args.add(arg.toString());
         }
@@ -218,16 +220,15 @@ public abstract class CommandLine {
         // Make a best-effort to ensure we make a clean (atomic) switch over from the old to
         // the new command line implementation. If another thread is modifying the command line
         // when this happens, all bets are off. (As per the native CommandLine).
-        sCommandLine.set(new NativeCommandLine(getJavaSwitchesOrNull()));
+        sCommandLine.set(new NativeCommandLine(getJavaSwitches()));
     }
 
-    @Nullable
-    public static String[] getJavaSwitchesOrNull() {
+    public static String[] getJavaSwitches() {
         CommandLine commandLine = sCommandLine.get();
         if (commandLine != null) {
             return commandLine.getCommandLineArguments();
         }
-        return null;
+        return new String[0];
     }
 
     private static void setInstance(CommandLine commandLine) {
@@ -235,15 +236,6 @@ public abstract class CommandLine {
         if (oldCommandLine != null) {
             oldCommandLine.destroy();
         }
-    }
-
-    /**
-     * Set {@link CommandLine} for testing.
-     * @param commandLine The {@link CommandLine} to use.
-     */
-    @VisibleForTesting
-    public static void setInstanceForTesting(CommandLine commandLine) {
-        setInstance(commandLine);
     }
 
     /**
@@ -264,7 +256,8 @@ public abstract class CommandLine {
 
     private CommandLine() {}
 
-    private static class JavaCommandLine extends CommandLine {
+    @VisibleForTesting
+    static class JavaCommandLine extends CommandLine {
         private HashMap<String, String> mSwitches = new HashMap<String, String>();
         private ArrayList<String> mArgs = new ArrayList<String>();
 
@@ -293,11 +286,11 @@ public abstract class CommandLine {
         }
 
         @Override
-        public String getSwitchValue(String switchString) {
+        public @Nullable String getSwitchValue(String switchString) {
             // This is slightly round about, but needed for consistency with the NativeCommandLine
             // version which does not distinguish empty values from key not present.
             String value = mSwitches.get(switchString);
-            return value == null || value.isEmpty() ? null : value;
+            return TextUtils.isEmpty(value) ? null : value;
         }
 
         @Override
@@ -384,8 +377,9 @@ public abstract class CommandLine {
         }
 
         @Override
-        public String getSwitchValue(String switchString) {
-            return CommandLineJni.get().getSwitchValue(switchString);
+        public @Nullable String getSwitchValue(String switchString) {
+            String ret = CommandLineJni.get().getSwitchValue(switchString);
+            return ret.isEmpty() ? null : ret;
         }
 
         @Override
@@ -446,13 +440,23 @@ public abstract class CommandLine {
 
     @NativeMethods
     interface Natives {
-        void init(String[] args);
-        boolean hasSwitch(String switchString);
-        String getSwitchValue(String switchString);
+        void init(@JniType("std::vector<std::string>") String[] args);
+
+        boolean hasSwitch(@JniType("std::string") String switchString);
+
+        @JniType("std::string")
+        String getSwitchValue(@JniType("std::string") String switchString);
+
+        @JniType("std::vector<std::string>")
         String[] getSwitchesFlattened();
-        void appendSwitch(String switchString);
-        void appendSwitchWithValue(String switchString, String value);
-        void appendSwitchesAndArguments(String[] array);
-        void removeSwitch(String switchString);
+
+        void appendSwitch(@JniType("std::string") String switchString);
+
+        void appendSwitchWithValue(
+                @JniType("std::string") String switchString, @JniType("std::string") String value);
+
+        void appendSwitchesAndArguments(@JniType("std::vector<std::string>") String[] array);
+
+        void removeSwitch(@JniType("std::string") String switchString);
     }
 }

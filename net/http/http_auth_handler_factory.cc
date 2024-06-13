@@ -4,6 +4,7 @@
 
 #include "net/http/http_auth_handler_factory.h"
 
+#include <optional>
 #include <set>
 
 #include "base/containers/contains.h"
@@ -22,7 +23,6 @@
 #include "net/log/net_log_values.h"
 #include "net/net_buildflags.h"
 #include "net/ssl/ssl_info.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/scheme_host_port.h"
 
 #if BUILDFLAG(USE_KERBEROS)
@@ -31,12 +31,12 @@
 
 namespace {
 
-base::Value NetLogParamsForCreateAuth(
+base::Value::Dict NetLogParamsForCreateAuth(
     const std::string& scheme,
     const std::string& challenge,
     const int net_error,
     const url::SchemeHostPort& scheme_host_port,
-    const absl::optional<bool>& allows_default_credentials,
+    const std::optional<bool>& allows_default_credentials,
     net::NetLogCaptureMode capture_mode) {
   base::Value::Dict dict;
   dict.Set("scheme", net::NetLogStringValue(scheme));
@@ -47,7 +47,7 @@ base::Value NetLogParamsForCreateAuth(
     dict.Set("allows_default_credentials", *allows_default_credentials);
   if (net_error < 0)
     dict.Set("net_error", net_error);
-  return base::Value(std::move(dict));
+  return dict;
 }
 
 }  // namespace
@@ -58,13 +58,13 @@ int HttpAuthHandlerFactory::CreateAuthHandlerFromString(
     const std::string& challenge,
     HttpAuth::Target target,
     const SSLInfo& ssl_info,
-    const NetworkIsolationKey& network_isolation_key,
+    const NetworkAnonymizationKey& network_anonymization_key,
     const url::SchemeHostPort& scheme_host_port,
     const NetLogWithSource& net_log,
     HostResolver* host_resolver,
     std::unique_ptr<HttpAuthHandler>* handler) {
   HttpAuthChallengeTokenizer props(challenge.begin(), challenge.end());
-  return CreateAuthHandler(&props, target, ssl_info, network_isolation_key,
+  return CreateAuthHandler(&props, target, ssl_info, network_anonymization_key,
                            scheme_host_port, CREATE_CHALLENGE, 1, net_log,
                            host_resolver, handler);
 }
@@ -72,7 +72,7 @@ int HttpAuthHandlerFactory::CreateAuthHandlerFromString(
 int HttpAuthHandlerFactory::CreatePreemptiveAuthHandlerFromString(
     const std::string& challenge,
     HttpAuth::Target target,
-    const NetworkIsolationKey& network_isolation_key,
+    const NetworkAnonymizationKey& network_anonymization_key,
     const url::SchemeHostPort& scheme_host_port,
     int digest_nonce_count,
     const NetLogWithSource& net_log,
@@ -80,9 +80,10 @@ int HttpAuthHandlerFactory::CreatePreemptiveAuthHandlerFromString(
     std::unique_ptr<HttpAuthHandler>* handler) {
   HttpAuthChallengeTokenizer props(challenge.begin(), challenge.end());
   SSLInfo null_ssl_info;
-  return CreateAuthHandler(&props, target, null_ssl_info, network_isolation_key,
-                           scheme_host_port, CREATE_PREEMPTIVE,
-                           digest_nonce_count, net_log, host_resolver, handler);
+  return CreateAuthHandler(&props, target, null_ssl_info,
+                           network_anonymization_key, scheme_host_port,
+                           CREATE_PREEMPTIVE, digest_nonce_count, net_log,
+                           host_resolver, handler);
 }
 
 HttpAuthHandlerRegistryFactory::HttpAuthHandlerRegistryFactory(
@@ -194,7 +195,7 @@ int HttpAuthHandlerRegistryFactory::CreateAuthHandler(
     HttpAuthChallengeTokenizer* challenge,
     HttpAuth::Target target,
     const SSLInfo& ssl_info,
-    const NetworkIsolationKey& network_isolation_key,
+    const NetworkAnonymizationKey& network_anonymization_key,
     const url::SchemeHostPort& scheme_host_port,
     CreateReason reason,
     int digest_nonce_count,
@@ -220,8 +221,9 @@ int HttpAuthHandlerRegistryFactory::CreateAuthHandler(
       net_error = ERR_UNSUPPORTED_AUTH_SCHEME;
     } else {
       net_error = factory->CreateAuthHandler(
-          challenge, target, ssl_info, network_isolation_key, scheme_host_port,
-          reason, digest_nonce_count, net_log, host_resolver, handler);
+          challenge, target, ssl_info, network_anonymization_key,
+          scheme_host_port, reason, digest_nonce_count, net_log, host_resolver,
+          handler);
     }
   }
 
@@ -231,8 +233,8 @@ int HttpAuthHandlerRegistryFactory::CreateAuthHandler(
         return NetLogParamsForCreateAuth(
             scheme, challenge->challenge_text(), net_error, scheme_host_port,
             *handler
-                ? absl::make_optional((*handler)->AllowsDefaultCredentials())
-                : absl::nullopt,
+                ? std::make_optional((*handler)->AllowsDefaultCredentials())
+                : std::nullopt,
             capture_mode);
       });
   return net_error;
@@ -253,10 +255,10 @@ bool HttpAuthHandlerRegistryFactory::IsSchemeAllowed(
 }
 
 #if BUILDFLAG(USE_KERBEROS) && !BUILDFLAG(IS_ANDROID) && BUILDFLAG(IS_POSIX)
-absl::optional<std::string>
+std::optional<std::string>
 HttpAuthHandlerRegistryFactory::GetNegotiateLibraryNameForTesting() const {
   if (!IsSchemeAllowed(kNegotiateAuthScheme))
-    return absl::nullopt;
+    return std::nullopt;
 
   return reinterpret_cast<net::HttpAuthHandlerNegotiate::Factory*>(
              GetSchemeFactory(net::kNegotiateAuthScheme))

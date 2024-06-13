@@ -26,8 +26,10 @@
 
 #include "base/memory/scoped_refptr.h"
 #include "third_party/blink/renderer/core/core_export.h"
+#include "third_party/blink/renderer/core/css/cascade_layer_map.h"
 #include "third_party/blink/renderer/core/css/css_selector.h"
 #include "third_party/blink/renderer/core/css/resolver/cascade_origin.h"
+#include "third_party/blink/renderer/core/css/resolver/match_flags.h"
 #include "third_party/blink/renderer/core/css/rule_set.h"
 #include "third_party/blink/renderer/core/dom/tree_scope.h"
 #include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
@@ -50,7 +52,8 @@ struct CORE_EXPORT MatchedProperties {
 
   struct Data {
     unsigned link_match_type : 2;
-    unsigned valid_property_filter : 3;
+    unsigned valid_property_filter : 4;
+    unsigned signal : 2;  // CSSSelector::Signal
     CascadeOrigin origin;
     // This is approximately equivalent to the 'shadow-including tree order'.
     // It can be used to evaluate the 'Shadow Tree' criteria. Note that the
@@ -63,6 +66,14 @@ struct CORE_EXPORT MatchedProperties {
     // https://drafts.csswg.org/css-cascade-5/#layer-ordering
     uint16_t layer_order;
     bool is_inline_style;
+    // Try styles come from position-try-options.
+    // https://drafts.csswg.org/css-anchor-position-1/#fallback
+    bool is_try_style;
+    // Try-tactics style come from <try-tactic>.
+    // https://drafts.csswg.org/css-anchor-position-1/#typedef-position-try-options-try-tactic
+    bool is_try_tactics_style;
+    // See CSSSelector::IsInvisible.
+    bool is_invisible;
   };
   Data types_;
 };
@@ -75,56 +86,18 @@ namespace blink {
 
 using MatchedPropertiesVector = HeapVector<MatchedProperties, 64>;
 
-class AddMatchedPropertiesOptions {
+struct AddMatchedPropertiesOptions {
   STACK_ALLOCATED();
 
  public:
-  class Builder;
-
-  unsigned GetLinkMatchType() const { return link_match_type_; }
-  ValidPropertyFilter GetValidPropertyFilter() const {
-    return valid_property_filter_;
-  }
-  unsigned GetLayerOrder() const { return layer_order_; }
-  bool IsInlineStyle() const { return is_inline_style_; }
-
- private:
-  unsigned link_match_type_ = CSSSelector::kMatchAll;
-  ValidPropertyFilter valid_property_filter_ = ValidPropertyFilter::kNoFilter;
-  unsigned layer_order_ = 0;
-  bool is_inline_style_ = false;
-
-  friend class Builder;
-};
-
-class AddMatchedPropertiesOptions::Builder {
-  STACK_ALLOCATED();
-
- public:
-  AddMatchedPropertiesOptions Build() { return options_; }
-
-  Builder& SetLinkMatchType(unsigned type) {
-    options_.link_match_type_ = type;
-    return *this;
-  }
-
-  Builder& SetValidPropertyFilter(ValidPropertyFilter filter) {
-    options_.valid_property_filter_ = filter;
-    return *this;
-  }
-
-  Builder& SetLayerOrder(unsigned layer_order) {
-    options_.layer_order_ = layer_order;
-    return *this;
-  }
-
-  Builder& SetIsInlineStyle(bool is_inline_style) {
-    options_.is_inline_style_ = is_inline_style;
-    return *this;
-  }
-
- private:
-  AddMatchedPropertiesOptions options_;
+  unsigned link_match_type = CSSSelector::kMatchAll;
+  ValidPropertyFilter valid_property_filter = ValidPropertyFilter::kNoFilter;
+  CSSSelector::Signal signal = CSSSelector::Signal::kNone;
+  unsigned layer_order = CascadeLayerMap::kImplicitOuterLayerOrder;
+  bool is_inline_style = false;
+  bool is_try_style = false;
+  bool is_try_tactics_style = false;
+  bool is_invisible = false;
 };
 
 class CORE_EXPORT MatchResult {
@@ -137,13 +110,18 @@ class CORE_EXPORT MatchResult {
 
   void AddMatchedProperties(
       const CSSPropertyValueSet* properties,
+      CascadeOrigin origin,
       const AddMatchedPropertiesOptions& = AddMatchedPropertiesOptions());
   bool HasMatchedProperties() const { return matched_properties_.size(); }
 
-  void FinishAddingUARules();
-  void FinishAddingUserRules();
-  void FinishAddingPresentationalHints();
-  void FinishAddingAuthorRulesForTreeScope(const TreeScope&);
+  void BeginAddingAuthorRulesForTreeScope(const TreeScope&);
+
+  void AddCustomHighlightName(const AtomicString& custom_highlight_name) {
+    custom_highlight_names_.insert(custom_highlight_name);
+  }
+  const HashSet<AtomicString>& CustomHighlightNames() const {
+    return custom_highlight_names_;
+  }
 
   void SetIsCacheable(bool cacheable) { is_cacheable_ = cacheable; }
   bool IsCacheable() const { return is_cacheable_; }
@@ -154,10 +132,22 @@ class CORE_EXPORT MatchResult {
     return depends_on_size_container_queries_;
   }
   void SetDependsOnStyleContainerQueries() {
-    depends_on_size_container_queries_ = true;
+    depends_on_style_container_queries_ = true;
   }
   bool DependsOnStyleContainerQueries() const {
-    return depends_on_size_container_queries_;
+    return depends_on_style_container_queries_;
+  }
+  void SetDependsOnStateContainerQueries() {
+    depends_on_state_container_queries_ = true;
+  }
+  bool DependsOnStateContainerQueries() const {
+    return depends_on_state_container_queries_;
+  }
+  void SetFirstLineDependsOnSizeContainerQueries() {
+    first_line_depends_on_size_container_queries_ = true;
+  }
+  bool FirstLineDependsOnSizeContainerQueries() const {
+    return first_line_depends_on_size_container_queries_;
   }
   void SetDependsOnStaticViewportUnits() {
     depends_on_static_viewport_units_ = true;
@@ -171,11 +161,11 @@ class CORE_EXPORT MatchResult {
   bool DependsOnDynamicViewportUnits() const {
     return depends_on_dynamic_viewport_units_;
   }
-  void SetDependsOnRemContainerQueries() {
-    depends_on_rem_container_queries_ = true;
+  void SetDependsOnRootFontContainerQueries() {
+    depends_on_root_font_container_queries_ = true;
   }
-  bool DependsOnRemContainerQueries() const {
-    return depends_on_rem_container_queries_;
+  bool DependsOnRootFontContainerQueries() const {
+    return depends_on_root_font_container_queries_;
   }
   void SetConditionallyAffectsAnimations() {
     conditionally_affects_animations_ = true;
@@ -183,6 +173,36 @@ class CORE_EXPORT MatchResult {
   bool ConditionallyAffectsAnimations() const {
     return conditionally_affects_animations_;
   }
+  void SetHasNonUniversalHighlightPseudoStyles() {
+    has_non_universal_highlight_pseudo_styles_ = true;
+  }
+  bool HasNonUniversalHighlightPseudoStyles() const {
+    return has_non_universal_highlight_pseudo_styles_;
+  }
+  void SetHasNonUaHighlightPseudoStyles() {
+    has_non_ua_highlight_pseudo_styles_ = true;
+  }
+  bool HasNonUaHighlightPseudoStyles() const {
+    return has_non_ua_highlight_pseudo_styles_;
+  }
+  void SetHighlightsDependOnSizeContainerQueries() {
+    highlights_depend_on_size_container_queries_ = true;
+  }
+  bool HighlightsDependOnSizeContainerQueries() const {
+    return highlights_depend_on_size_container_queries_;
+  }
+
+  bool HasFlag(MatchFlag flag) const {
+    return flags_ & static_cast<MatchFlags>(flag);
+  }
+  void AddFlags(MatchFlags flags) { flags_ |= flags; }
+
+  void SetHasPseudoElementStyle(PseudoId pseudo) {
+    DCHECK(pseudo >= kFirstPublicPseudoId);
+    DCHECK(pseudo <= kLastTrackedPublicPseudoId);
+    pseudo_element_styles_ |= 1 << (pseudo - kFirstPublicPseudoId);
+  }
+  unsigned PseudoElementStyles() const { return pseudo_element_styles_; }
 
   const MatchedPropertiesVector& GetMatchedProperties() const {
     return matched_properties_;
@@ -192,6 +212,13 @@ class CORE_EXPORT MatchResult {
   // objects were added.
   void Reset();
 
+  const TreeScope* CurrentTreeScope() const {
+    if (tree_scopes_.empty()) {
+      return nullptr;
+    }
+    return tree_scopes_.back().Get();
+  }
+
   const TreeScope& ScopeFromTreeOrder(uint16_t tree_order) const {
     SECURITY_DCHECK(tree_order < tree_scopes_.size());
     return *tree_scopes_[tree_order];
@@ -200,14 +227,25 @@ class CORE_EXPORT MatchResult {
  private:
   MatchedPropertiesVector matched_properties_;
   HeapVector<Member<const TreeScope>, 4> tree_scopes_;
+  HashSet<AtomicString> custom_highlight_names_;
   bool is_cacheable_{true};
   bool depends_on_size_container_queries_{false};
+  bool depends_on_style_container_queries_{false};
+  bool depends_on_state_container_queries_{false};
+  bool first_line_depends_on_size_container_queries_{false};
   bool depends_on_static_viewport_units_{false};
   bool depends_on_dynamic_viewport_units_{false};
-  bool depends_on_rem_container_queries_{false};
+  bool depends_on_root_font_container_queries_{false};
   bool conditionally_affects_animations_{false};
-  CascadeOrigin current_origin_{CascadeOrigin::kUserAgent};
+  bool has_non_universal_highlight_pseudo_styles_{false};
+  bool has_non_ua_highlight_pseudo_styles_{false};
+  bool highlights_depend_on_size_container_queries_{false};
+  MatchFlags flags_{0};
+#if DCHECK_IS_ON()
+  CascadeOrigin last_origin_{CascadeOrigin::kNone};
+#endif
   uint16_t current_tree_order_{0};
+  uint16_t pseudo_element_styles_{kPseudoIdNone};
 };
 
 inline bool operator==(const MatchedProperties& a, const MatchedProperties& b) {

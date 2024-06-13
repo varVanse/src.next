@@ -8,7 +8,7 @@
 #include <memory>
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/values.h"
 #include "build/build_config.h"
 #include "build/chromeos_buildflags.h"
@@ -17,6 +17,7 @@
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "extensions/browser/event_router.h"
+#include "extensions/common/extension_id.h"
 #include "url/gurl.h"
 
 using content::BrowserThread;
@@ -55,7 +56,7 @@ void EventRouterForwarder::DispatchEventToRenderers(
 }
 
 void EventRouterForwarder::HandleEvent(
-    const std::string& extension_id,
+    const ExtensionId& extension_id,
     events::HistogramValue histogram_value,
     const std::string& event_name,
     base::Value::List event_args,
@@ -121,28 +122,28 @@ void EventRouterForwarder::HandleEvent(
 
 void EventRouterForwarder::CallEventRouter(
     Profile* profile,
-    const std::string& extension_id,
+    const ExtensionId& extension_id,
     events::HistogramValue histogram_value,
     const std::string& event_name,
     base::Value::List event_args,
     Profile* restrict_to_profile,
     const GURL& event_url) {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+  auto* event_router = extensions::EventRouter::Get(profile);
   // Extension does not exist for chromeos login.  This needs to be
   // removed once we have an extension service for login screen.
   // crosbug.com/12856.
-  if (!extensions::EventRouter::Get(profile))
+  //
+  // Extensions are not available on System Profile.
+  if (!event_router)
     return;
-#endif
 
   auto event = std::make_unique<Event>(
       histogram_value, event_name, std::move(event_args), restrict_to_profile);
   event->event_url = event_url;
   if (extension_id.empty()) {
-    extensions::EventRouter::Get(profile)->BroadcastEvent(std::move(event));
+    event_router->BroadcastEvent(std::move(event));
   } else {
-    extensions::EventRouter::Get(profile)
-        ->DispatchEventToExtension(extension_id, std::move(event));
+    event_router->DispatchEventToExtension(extension_id, std::move(event));
   }
 }
 

@@ -32,7 +32,6 @@
 #include "third_party/blink/renderer/core/css/css_font_selector.h"
 #include "third_party/blink/renderer/core/css/font_face.h"
 #include "third_party/blink/renderer/core/css/font_face_set.h"
-#include "third_party/blink/renderer/core/css/style_engine.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/events/event_listener.h"
 #include "third_party/blink/renderer/core/dom/events/event_target.h"
@@ -53,7 +52,7 @@ class CORE_EXPORT FontFaceSetDocument final : public FontFaceSet,
   FontFaceSetDocument& operator=(const FontFaceSetDocument&) = delete;
   ~FontFaceSetDocument() override;
 
-  ScriptPromise ready(ScriptState*) override;
+  ScriptPromise<FontFaceSet> ready(ScriptState*) override;
 
   AtomicString status() const override;
 
@@ -81,10 +80,7 @@ class CORE_EXPORT FontFaceSetDocument final : public FontFaceSet,
 
  protected:
   bool InActiveContext() const override;
-  FontSelector* GetFontSelector() const override {
-    DCHECK(IsMainThread());
-    return GetDocument()->GetStyleEngine().GetFontSelector();
-  }
+  FontSelector* GetFontSelector() const override;
 
   bool ResolveFontStyle(const String&, Font&) override;
 
@@ -111,22 +107,6 @@ class CORE_EXPORT FontFaceSetDocument final : public FontFaceSet,
     Status status_;
   };
   FontLoadHistogram font_load_histogram_;
-
-  class FontDisplayAutoAlignHistogram {
-    DISALLOW_NEW();
-
-   public:
-    void SetHasFontDisplayAuto() { has_font_display_auto_ = true; }
-    void CountAffected() { ++affected_count_; }
-
-    void Record();
-
-   private:
-    unsigned affected_count_ = 0;
-    bool has_font_display_auto_ = false;
-    bool reported_ = false;
-  };
-  FontDisplayAutoAlignHistogram font_display_auto_align_histogram_;
 
   HeapTaskRunnerTimer<FontFaceSetDocument> lcp_limit_timer_;
 

@@ -34,7 +34,9 @@
 #include <vector>
 
 #include "base/run_loop.h"
+#include "base/test/scoped_feature_list.h"
 #include "cc/trees/layer_tree_host.h"
+#include "components/autofill/core/common/autofill_features.h"
 #include "services/network/public/mojom/web_sandbox_flags.mojom-blink.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/input/web_input_event.h"
@@ -57,6 +59,7 @@
 #include "third_party/blink/renderer/core/html/forms/html_form_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_select_element.h"
+#include "third_party/blink/renderer/core/html/forms/html_select_list_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_text_area_element.h"
 #include "third_party/blink/renderer/core/html/forms/mock_file_chooser.h"
 #include "third_party/blink/renderer/core/html/forms/text_control_element.h"
@@ -68,6 +71,7 @@
 #include "third_party/blink/renderer/core/script/classic_script.h"
 #include "third_party/blink/renderer/core/testing/page_test_base.h"
 #include "third_party/blink/renderer/platform/language.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 
 // To avoid conflicts with the CreateWindow macro from the Windows SDK...
 #undef CreateWindow
@@ -80,8 +84,9 @@ namespace blink {
 namespace {
 class FakeChromeClientForAutofill : public EmptyChromeClient {
  public:
-  void JavaScriptChangedAutofilledValue(HTMLFormControlElement& element,
-                                        const String& old_value) override {
+  void JavaScriptChangedValue(HTMLFormControlElement& element,
+                              const String& old_value,
+                              bool was_autofilled) override {
     last_notification_ = {element.GetIdAttribute().Utf8(), old_value.Utf8()};
   }
   std::vector<std::string> GetAndResetLastEvent() {
@@ -103,8 +108,9 @@ class ViewCreatingClient : public frame_test_helpers::TestWebFrameClient {
       network::mojom::blink::WebSandboxFlags,
       const SessionStorageNamespaceId&,
       bool& consumed_user_gesture,
-      const absl::optional<Impression>&,
-      const absl::optional<WebPictureInPictureWindowOptions>&) override {
+      const std::optional<Impression>&,
+      const std::optional<WebPictureInPictureWindowOptions>&,
+      const WebURL& creator_base_url) override {
     return web_view_helper_.InitializeWithOpener(Frame());
   }
 
@@ -121,6 +127,7 @@ class CreateWindowTest : public testing::Test {
         To<ChromeClientImpl>(&web_view_->GetPage()->GetChromeClient());
   }
 
+  test::TaskEnvironment task_environment_;
   ViewCreatingClient web_frame_client_;
   frame_test_helpers::WebViewHelper helper_;
   WebViewImpl* web_view_;
@@ -136,7 +143,7 @@ TEST_F(CreateWindowTest, CreateWindowFromPausedPage) {
   WebWindowFeatures features;
   bool consumed_user_gesture = false;
   EXPECT_EQ(nullptr, chrome_client_impl_->CreateWindow(
-                         frame, request, "", features,
+                         frame, request, g_empty_atom, features,
                          network::mojom::blink::WebSandboxFlags::kNone, "",
                          consumed_user_gesture));
 }
@@ -209,7 +216,7 @@ class FakeColorChooserClient : public GarbageCollected<FakeColorChooserClient>,
   void DidChooseColor(const Color& color) override {}
   void DidEndChooser() override {}
   Element& OwnerElement() const override { return *owner_element_; }
-  gfx::Rect ElementRectRelativeToViewport() const override {
+  gfx::Rect ElementRectRelativeToLocalRoot() const override {
     return gfx::Rect();
   }
   Color CurrentColor() override { return Color(); }
@@ -266,7 +273,7 @@ class PagePopupSuppressionTest : public testing::Test {
     LocalFrame* frame = main_frame_->GetFrame();
     DateTimeChooserParameters params;
     params.locale = DefaultLanguage();
-    params.type = input_type_names::kTime;
+    params.type = InputType::Type::kTime;
     DateTimeChooser* chooser = chrome_client_impl_->OpenDateTimeChooser(
         frame, date_time_chooser_client_, params);
     if (chooser)
@@ -296,6 +303,7 @@ class PagePopupSuppressionTest : public testing::Test {
   void TearDown() override {}
 
  protected:
+  test::TaskEnvironment task_environment_;
   frame_test_helpers::WebViewHelper helper_;
   WebViewImpl* web_view_;
   Persistent<WebLocalFrameImpl> main_frame_;
@@ -304,38 +312,6 @@ class PagePopupSuppressionTest : public testing::Test {
   Persistent<FakeDateTimeChooserClient> date_time_chooser_client_;
   Persistent<HTMLSelectElement> select_;
 };
-
-TEST_F(PagePopupSuppressionTest, SuppressColorChooser) {
-  // Some platforms don't support PagePopups so just return.
-  if (!RuntimeEnabledFeatures::PagePopupEnabled())
-    return;
-  // By default, the popup should be shown.
-  EXPECT_TRUE(CanOpenColorChooser());
-
-  Settings* settings = GetSettings();
-  settings->SetImmersiveModeEnabled(true);
-
-  EXPECT_FALSE(CanOpenColorChooser());
-
-  settings->SetImmersiveModeEnabled(false);
-  EXPECT_TRUE(CanOpenColorChooser());
-}
-
-TEST_F(PagePopupSuppressionTest, SuppressDateTimeChooser) {
-  // Some platforms don't support PagePopups so just return.
-  if (!RuntimeEnabledFeatures::PagePopupEnabled())
-    return;
-  // By default, the popup should be shown.
-  EXPECT_TRUE(CanOpenDateTimeChooser());
-
-  Settings* settings = GetSettings();
-  settings->SetImmersiveModeEnabled(true);
-
-  EXPECT_FALSE(CanOpenDateTimeChooser());
-
-  settings->SetImmersiveModeEnabled(false);
-  EXPECT_TRUE(CanOpenDateTimeChooser());
-}
 
 // A FileChooserClient which makes FileChooser::OpenFileChooser() success.
 class MockFileChooserClient : public GarbageCollected<MockFileChooserClient>,
@@ -352,7 +328,7 @@ class MockFileChooserClient : public GarbageCollected<MockFileChooserClient>,
   void FilesChosen(FileChooserFileInfoList, const base::FilePath&) override {}
   void WillOpenPopup() override {}
 
-  LocalFrame* FrameOrNull() const override { return frame_; }
+  LocalFrame* FrameOrNull() const override { return frame_.Get(); }
 
   Member<LocalFrame> frame_;
 };
@@ -365,6 +341,7 @@ class FileChooserQueueTest : public testing::Test {
         To<ChromeClientImpl>(&web_view_->GetPage()->GetChromeClient());
   }
 
+  test::TaskEnvironment task_environment_;
   frame_test_helpers::WebViewHelper helper_;
   WebViewImpl* web_view_;
   Persistent<ChromeClientImpl> chrome_client_impl_;
@@ -403,6 +380,8 @@ TEST_F(FileChooserQueueTest, DerefQueuedChooser) {
 class AutofillChromeClientTest : public PageTestBase {
  public:
   void SetUp() override {
+    scoped_feature_list_.InitAndEnableFeature(
+        autofill::features::kAutofillEnableSelectList);
     chrome_client_ = MakeGarbageCollected<FakeChromeClientForAutofill>();
     SetupPageWithClients(chrome_client_);
     GetFrame().GetSettings()->SetScriptEnabled(true);
@@ -414,9 +393,10 @@ class AutofillChromeClientTest : public PageTestBase {
   }
 
   Persistent<FakeChromeClientForAutofill> chrome_client_;
+  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
-// Validates the JavaScriptChangedAutofilledValue notification if JavaScript
+// Validates the JavaScriptChangedValue notification if JavaScript
 // overrides the autofilled content of form controls *after* the fill has been
 // concluded.
 TEST_F(AutofillChromeClientTest, NotificationsOfJavaScriptChangesAfterFill) {
@@ -431,6 +411,11 @@ TEST_F(AutofillChromeClientTest, NotificationsOfJavaScriptChangesAfterFill) {
         <option value='autofilled_select'>b</option>
         <option value='overridden'>c</option>
       </select>
+      <selectlist id='selectlist'>
+        <option value='initial' selected>a</option>
+        <option value='autofilled_selectlist'>b</option>
+        <option value='overridden'>c</option>
+      </selectlist>
       <input id='not_autofilled_text'>
     </form>
   )HTML");
@@ -438,7 +423,8 @@ TEST_F(AutofillChromeClientTest, NotificationsOfJavaScriptChangesAfterFill) {
   auto* text_element = To<HTMLInputElement>(GetElementById("text"));
   auto* textarea_element = To<HTMLTextAreaElement>(GetElementById("textarea"));
   auto* select_element = To<HTMLSelectElement>(GetElementById("select"));
-  // HTMLSelectMenu does not support autofill, yet.
+  auto* selectlist_element =
+      To<HTMLSelectListElement>(GetElementById("selectlist"));
   auto* not_autofilled_text =
       To<HTMLInputElement>(GetElementById("not_autofilled_text"));
 
@@ -446,6 +432,8 @@ TEST_F(AutofillChromeClientTest, NotificationsOfJavaScriptChangesAfterFill) {
   textarea_element->SetAutofillValue("autofilled_textarea");
   select_element->SetAutofillValue("autofilled_select",
                                    WebAutofillState::kAutofilled);
+  selectlist_element->SetAutofillValue("autofilled_selectlist",
+                                       WebAutofillState::kAutofilled);
 
   EXPECT_THAT(text_element->Value(), Eq("autofilled_text"));
   EXPECT_THAT(text_element->GetAutofillState(),
@@ -477,16 +465,27 @@ TEST_F(AutofillChromeClientTest, NotificationsOfJavaScriptChangesAfterFill) {
   EXPECT_THAT(chrome_client_->GetAndResetLastEvent(),
               ::testing::ElementsAre("select", "autofilled_select"));
 
-  // Because this is not in state "autofilled", the chrome client is not
+  EXPECT_THAT(selectlist_element->value(), Eq("autofilled_selectlist"));
+  EXPECT_THAT(selectlist_element->GetAutofillState(),
+              Eq(WebAutofillState::kAutofilled));
+  ExecuteScript("document.getElementById('selectlist').value = 'overridden';");
+  EXPECT_THAT(selectlist_element->value(), Eq("overridden"));
+  EXPECT_THAT(selectlist_element->GetAutofillState(),
+              Eq(WebAutofillState::kNotFilled));
+  EXPECT_THAT(chrome_client_->GetAndResetLastEvent(),
+              ::testing::ElementsAre("selectlist", "autofilled_selectlist"));
+
+  // Even for elements that are not in state "autofilled", the chrome client is
   // informed about the change.
   EXPECT_THAT(not_autofilled_text->Value().IsNull(), ::testing::IsTrue());
   ExecuteScript(
       "document.getElementById('not_autofilled_text').value = 'new_text';");
   EXPECT_THAT(not_autofilled_text->Value(), Eq("new_text"));
-  EXPECT_THAT(chrome_client_->GetAndResetLastEvent(), ::testing::ElementsAre());
+  EXPECT_THAT(chrome_client_->GetAndResetLastEvent(),
+              ::testing::ElementsAre("not_autofilled_text", ""));
 }
 
-// Validates the JavaScriptChangedAutofilledValue notification if JavaScript
+// Validates the JavaScriptChangedValue notification if JavaScript
 // overrides the autofilled content of form controls during the fill operation.
 // This is the case because a JavaScript event handler on change signals is
 // is triggered during the autofill operation.
@@ -502,11 +501,16 @@ TEST_F(AutofillChromeClientTest, NotificationsOfJavaScriptChangesDuringFill) {
         <option value='autofilled_select'>b</option>
         <option value='overridden'>c</option>
       </select>
+      <selectlist id='selectlist'>
+        <option value='initial' selected>a</option>
+        <option value='autofilled_selectlist'>b</option>
+        <option value='overridden'>c</option>
+      </selectlist>
     </form>
   )HTML");
 
   ExecuteScript(R"JS(
-    for (const id of ['text', 'textarea', 'select']) {
+    for (const id of ['text', 'textarea', 'select', 'selectlist']) {
       document.getElementById(id).addEventListener('change', () => {
         document.getElementById(id).value = 'overridden';
       });
@@ -516,7 +520,8 @@ TEST_F(AutofillChromeClientTest, NotificationsOfJavaScriptChangesDuringFill) {
   auto* text_element = To<HTMLInputElement>(GetElementById("text"));
   auto* textarea_element = To<HTMLTextAreaElement>(GetElementById("textarea"));
   auto* select_element = To<HTMLSelectElement>(GetElementById("select"));
-  // HTMLSelectMenu does not support autofill, yet.
+  auto* selectlist_element =
+      To<HTMLSelectListElement>(GetElementById("selectlist"));
   text_element->SetAutofillValue("autofilled_text");
   EXPECT_THAT(text_element->Value(), Eq("overridden"));
   // Note that we expect WebAutofillState::kAutofilled. This is a product
@@ -545,6 +550,14 @@ TEST_F(AutofillChromeClientTest, NotificationsOfJavaScriptChangesDuringFill) {
               Eq(WebAutofillState::kAutofilled));
   EXPECT_THAT(chrome_client_->GetAndResetLastEvent(),
               ::testing::ElementsAre("select", "autofilled_select"));
+
+  selectlist_element->SetAutofillValue("autofilled_selectlist",
+                                       WebAutofillState::kAutofilled);
+  EXPECT_THAT(selectlist_element->value(), Eq("overridden"));
+  EXPECT_THAT(selectlist_element->GetAutofillState(),
+              Eq(WebAutofillState::kAutofilled));
+  EXPECT_THAT(chrome_client_->GetAndResetLastEvent(),
+              ::testing::ElementsAre("selectlist", "autofilled_selectlist"));
 }
 
 }  // namespace blink

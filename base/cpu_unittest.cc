@@ -3,9 +3,12 @@
 // found in the LICENSE file.
 
 #include "base/cpu.h"
+
 #include "base/containers/contains.h"
 #include "base/logging.h"
+#include "base/memory/protected_memory_buildflags.h"
 #include "base/strings/string_util.h"
+#include "base/test/gtest_util.h"
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -71,6 +74,14 @@ TEST(CPU, RunExtendedInstructions) {
   if (cpu.has_avx2()) {
     // Execute an AVX 2 instruction.
     __asm__ __volatile__("vpunpcklbw %%ymm0, %%ymm0, %%ymm0\n" : : : "xmm0");
+  }
+
+  if (cpu.has_pku()) {
+    // rdpkru
+    uint32_t pkru;
+    __asm__ __volatile__(".byte 0x0f,0x01,0xee\n"
+                         : "=a"(pkru)
+                         : "c"(0), "d"(0));
   }
 // Visual C 32 bit and ClangCL 32/64 bit test.
 #elif defined(COMPILER_MSVC) && (defined(ARCH_CPU_32_BITS) || \
@@ -210,3 +221,19 @@ TEST(CPU, ARMImplementerAndPartNumber) {
 }
 #endif  // defined(ARCH_CPU_ARM_FAMILY) && (BUILDFLAG(IS_LINUX) ||
         // BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS))
+
+#if BUILDFLAG(PROTECTED_MEMORY_ENABLED)
+TEST(CPUDeathTest, VerifyModifyingCPUInstanceNoAllocationCrashes) {
+  const base::CPU& cpu = base::CPU::GetInstanceNoAllocation();
+  uint8_t* const bytes =
+      const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(&cpu));
+
+  // We try and flip a couple of bits and expect the test to die immediately.
+  // Checks are limited to every 15th byte, otherwise the tests run into
+  // time-outs.
+  for (size_t byte_index = 0; byte_index < sizeof(cpu); byte_index += 15) {
+    const size_t local_bit_index = byte_index % 8;
+    EXPECT_CHECK_DEATH_WITH(bytes[byte_index] ^= (0x01 << local_bit_index), "");
+  }
+}
+#endif

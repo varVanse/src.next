@@ -6,6 +6,8 @@
 
 #include <stdint.h>
 
+#include <optional>
+
 #include "base/base_paths.h"
 #include "base/clang_profiling_buildflags.h"
 #include "base/containers/span.h"
@@ -17,16 +19,15 @@
 #include "build/build_config.h"
 #include "build/buildflag.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 
 namespace {
 
-// If IMMEDIATE_CRASH() is not treated as noreturn by the compiler, the compiler
+// If ImmediateCrash() is not treated as noreturn by the compiler, the compiler
 // will complain that not all paths through this function return a value.
 [[maybe_unused]] int TestImmediateCrashTreatedAsNoReturn() {
-  IMMEDIATE_CRASH();
+  ImmediateCrash();
 }
 
 #if defined(ARCH_CPU_X86_FAMILY)
@@ -106,9 +107,6 @@ void GetTestFunctionInstructions(std::vector<Instruction>* body) {
 #endif
   helper_library_path = helper_library_path.AppendASCII(
       GetNativeLibraryName("immediate_crash_test_helper"));
-#if BUILDFLAG(IS_ANDROID) && defined(COMPONENT_BUILD)
-  helper_library_path = helper_library_path.ReplaceExtension(".cr.so");
-#endif
   ScopedNativeLibrary helper_library(helper_library_path);
   ASSERT_TRUE(helper_library.is_valid())
       << "shared library load failed: "
@@ -142,17 +140,16 @@ void GetTestFunctionInstructions(std::vector<Instruction>* body) {
     body->push_back(instruction);
 }
 
-absl::optional<std::vector<Instruction>> ExpectImmediateCrashInvocation(
+std::optional<std::vector<Instruction>> ExpectImmediateCrashInvocation(
     std::vector<Instruction> instructions) {
   auto iter = instructions.begin();
   for (const auto inst : kRequiredBody) {
     if (iter == instructions.end())
-      return absl::nullopt;
+      return std::nullopt;
     EXPECT_EQ(inst, *iter);
     iter++;
   }
-  return absl::make_optional(
-      std::vector<Instruction>(iter, instructions.end()));
+  return std::make_optional(std::vector<Instruction>(iter, instructions.end()));
 }
 
 std::vector<Instruction> MaybeSkipOptionalFooter(
@@ -201,13 +198,13 @@ std::vector<Instruction> MaybeSkipCoverageHook(
 
 }  // namespace
 
-// Attempts to verify the actual instructions emitted by IMMEDIATE_CRASH().
+// Attempts to verify the actual instructions emitted by ImmediateCrash().
 // While the test results are highly implementation-specific, this allows macro
 // changes (e.g. CLs like https://crrev.com/671123) to be verified using the
 // trybots/waterfall, without having to build and disassemble Chrome on
 // multiple platforms. This makes it easier to evaluate changes to
-// IMMEDIATE_CRASH() against its requirements (e.g. size of emitted sequence,
-// whether or not multiple IMMEDIATE_CRASH sequences can be folded together, et
+// ImmediateCrash() against its requirements (e.g. size of emitted sequence,
+// whether or not multiple ImmediateCrash sequences can be folded together, et
 // cetera). Please see immediate_crash.h for more details about the
 // requirements.
 //
@@ -225,7 +222,7 @@ TEST(ImmediateCrashTest, ExpectedOpcodeSequence) {
   it++;
 
   body = std::vector<Instruction>(it, body.end());
-  absl::optional<std::vector<Instruction>> result = MaybeSkipCoverageHook(body);
+  std::optional<std::vector<Instruction>> result = MaybeSkipCoverageHook(body);
   result = ExpectImmediateCrashInvocation(result.value());
   result = MaybeSkipOptionalFooter(result.value());
   result = MaybeSkipCoverageHook(result.value());

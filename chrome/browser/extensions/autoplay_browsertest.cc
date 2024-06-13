@@ -6,10 +6,9 @@
 #include "build/build_config.h"
 #include "build/chromeos_buildflags.h"
 #include "chrome/browser/extensions/extension_apitest.h"
+#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/extensions/extension_action_test_helper.h"
 #include "chrome/test/base/ui_test_utils.h"
-#include "content/public/browser/notification_service.h"
-#include "content/public/browser/notification_types.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/test_utils.h"
@@ -31,7 +30,7 @@ IN_PROC_BROWSER_TEST_F(AutoplayExtensionBrowserTest, AutoplayAllowed) {
   ASSERT_TRUE(RunExtensionTest("autoplay")) << message_;
 }
 
-// TODO(crbug.com/1166927): AutoplayAllowedInIframe sporadically (~10%?) times
+// TODO(crbug.com/40742402): AutoplayAllowedInIframe sporadically (~10%?) times
 // out on Linux.
 // TODO(crbug.com/1052397): Revisit once build flag switch of lacros-chrome is
 // complete.
@@ -51,11 +50,7 @@ IN_PROC_BROWSER_TEST_F(AutoplayExtensionBrowserTest,
   std::unique_ptr<ExtensionActionTestHelper> browser_action_test_util =
       ExtensionActionTestHelper::Create(browser());
   extensions::ResultCatcher catcher;
-  content::WindowedNotificationObserver popup_observer(
-      content::NOTIFICATION_LOAD_COMPLETED_MAIN_FRAME,
-      content::NotificationService::AllSources());
   browser_action_test_util->Press(extension->id());
-  popup_observer.Wait();
   EXPECT_TRUE(catcher.GetNextResult()) << catcher.message();
 }
 
@@ -88,8 +83,6 @@ IN_PROC_BROWSER_TEST_F(AutoplayExtensionBrowserTest,
       app_browser->tab_strip_model()->GetActiveWebContents();
   EXPECT_TRUE(content::WaitForLoadStop(web_contents));
 
-  bool result = false;
-  EXPECT_TRUE(content::ExecuteScriptWithoutUserGestureAndExtractBool(
-      web_contents, "runTest();", &result));
-  EXPECT_TRUE(result);
+  EXPECT_EQ(true, content::EvalJs(web_contents, "runTest();",
+                                  content::EXECUTE_SCRIPT_NO_USER_GESTURE));
 }

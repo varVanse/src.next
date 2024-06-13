@@ -9,12 +9,23 @@
 #include "components/strings/grit/components_strings.h"
 #include "content/public/browser/service_process_host.h"
 
+namespace chrome {
+// Class allows us to friend the passkeys we need to launch the service.
+class FileUtilServiceLauncher {
+ public:
+  static mojo::PendingRemote<chrome::mojom::FileUtilService>
+  LaunchFileUtilService() {
+    mojo::PendingRemote<chrome::mojom::FileUtilService> remote;
+    content::ServiceProcessHost::Launch<chrome::mojom::FileUtilService>(
+        remote.InitWithNewPipeAndPassReceiver(),
+        content::ServiceProcessHost::Options()
+            .WithDisplayName(IDS_UTILITY_PROCESS_FILE_UTILITY_NAME)
+            .Pass());
+    return remote;
+  }
+};
+}  // namespace chrome
+
 mojo::PendingRemote<chrome::mojom::FileUtilService> LaunchFileUtilService() {
-  mojo::PendingRemote<chrome::mojom::FileUtilService> remote;
-  content::ServiceProcessHost::Launch<chrome::mojom::FileUtilService>(
-      remote.InitWithNewPipeAndPassReceiver(),
-      content::ServiceProcessHost::Options()
-          .WithDisplayName(IDS_UTILITY_PROCESS_FILE_UTILITY_NAME)
-          .Pass());
-  return remote;
+  return chrome::FileUtilServiceLauncher::LaunchFileUtilService();
 }

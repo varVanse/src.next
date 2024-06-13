@@ -5,15 +5,15 @@
 #include "components/ntp_tiles/most_visited_sites.h"
 
 #include <algorithm>
-#include <cctype>
 #include <iterator>
 #include <memory>
 #include <utility>
+#include <vector>
 
-#include "base/bind.h"
-#include "base/callback.h"
-#include "base/callback_helpers.h"
 #include "base/feature_list.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/logging.h"
 #include "base/metrics/user_metrics.h"
 #include "base/observer_list.h"
@@ -31,8 +31,14 @@
 #include "components/pref_registry/pref_registry_syncable.h"
 #include "components/prefs/pref_service.h"
 #include "components/search/ntp_features.h"
+#include "components/supervised_user/core/common/buildflags.h"
 #include "components/webapps/common/constants.h"
 #include "extensions/buildflags/buildflags.h"
+
+#if BUILDFLAG(ENABLE_SUPERVISED_USERS)
+#include "components/supervised_user/core/browser/supervised_user_preferences.h"
+#include "components/supervised_user/core/browser/supervised_user_service.h"
+#endif
 
 #if BUILDFLAG(ENABLE_EXTENSIONS)
 // GN doesn't understand conditional includes, so we need nogncheck here.
@@ -122,33 +128,31 @@ std::u16string GenerateShortTitle(const std::u16string& title) {
 
 MostVisitedSites::MostVisitedSites(
     PrefService* prefs,
+    supervised_user::SupervisedUserService* supervised_user_service,
     scoped_refptr<history::TopSites> top_sites,
     std::unique_ptr<PopularSites> popular_sites,
     std::unique_ptr<CustomLinksManager> custom_links,
     std::unique_ptr<IconCacher> icon_cacher,
-    std::unique_ptr<MostVisitedSitesSupervisor> supervisor,
     bool is_default_chrome_app_migrated)
     : prefs_(prefs),
+      supervised_user_service_(supervised_user_service),
       top_sites_(top_sites),
       popular_sites_(std::move(popular_sites)),
       custom_links_(std::move(custom_links)),
       icon_cacher_(std::move(icon_cacher)),
-      supervisor_(std::move(supervisor)),
       is_default_chrome_app_migrated_(is_default_chrome_app_migrated),
       max_num_sites_(0u),
       mv_source_(TileSource::TOP_SITES),
       is_observing_(false) {
   DCHECK(prefs_);
-
-  // top_sites_ can be null in tests.
-  // TODO(sfiera): have iOS use a dummy TopSites in its tests.
-  if (supervisor_)
-    supervisor_->SetObserver(this);
+#if BUILDFLAG(ENABLE_SUPERVISED_USERS)
+  if (supervised_user_service_) {
+    supervised_user_service_observation_.Observe(supervised_user_service_);
+  }
+#endif
 }
 
 MostVisitedSites::~MostVisitedSites() {
-  if (supervisor_)
-    supervisor_->SetObserver(nullptr);
   observers_.Clear();
 }
 
@@ -176,11 +180,9 @@ bool MostVisitedSites::DoesSourceExist(TileSource source) const {
     case TileSource::HOMEPAGE:
       return homepage_client_ != nullptr;
     case TileSource::ALLOWLIST:
-      return supervisor_ != nullptr;
+      return supervised_user_service_ != nullptr;
     case TileSource::CUSTOM_LINKS:
       return custom_links_ != nullptr;
-    case TileSource::EXPLORE:
-      return explore_sites_client_ != nullptr;
   }
   NOTREACHED();
   return false;
@@ -190,11 +192,6 @@ void MostVisitedSites::SetHomepageClient(
     std::unique_ptr<HomepageClient> client) {
   DCHECK(client);
   homepage_client_ = std::move(client);
-}
-
-void MostVisitedSites::SetExploreSitesClient(
-    std::unique_ptr<ExploreSitesClient> client) {
-  explore_sites_client_ = std::move(client);
 }
 
 void MostVisitedSites::AddMostVisitedURLsObserver(Observer* observer,
@@ -423,9 +420,11 @@ void MostVisitedSites::ClearBlockedUrls() {
     top_sites_->ClearBlockedUrls();
 }
 
-void MostVisitedSites::OnBlockedSitesChanged() {
+#if BUILDFLAG(ENABLE_SUPERVISED_USERS)
+void MostVisitedSites::OnURLFilterChanged() {
   BuildCurrentTiles();
 }
+#endif
 
 // static
 void MostVisitedSites::RegisterProfilePrefs(
@@ -466,8 +465,12 @@ void MostVisitedSites::OnMostVisitedURLsAvailable(
     const history::MostVisitedURL& visited = visited_list[i];
     if (visited.url.is_empty())
       break;  // This is the signal that there are no more real visited sites.
-    if (supervisor_ && supervisor_->IsBlocked(visited.url))
+#if BUILDFLAG(ENABLE_SUPERVISED_USERS)
+    if (supervised_user_service_ &&
+        supervised_user_service_->IsBlockedURL(visited.url)) {
       continue;
+    }
+#endif
 
     NTPTile tile;
     tile.title =
@@ -477,8 +480,10 @@ void MostVisitedSites::OnMostVisitedURLsAvailable(
     // MostVisitedURL.title is either the title or the URL which is treated
     // exactly as the title. Differentiating here is not worth the overhead.
     tile.title_source = TileTitleSource::TITLE_TAG;
-    // TODO(crbug.com/773278): Populate |data_generation_time| here in order to
-    // log UMA metrics of age.
+    tile.visit_count = visited.visit_count;
+    tile.last_visit_time = visited.last_visit_time;
+    // TODO(crbug.com/41349031): Populate |data_generation_time| here in order
+    // to log UMA metrics of age.
     tiles.push_back(std::move(tile));
   }
 
@@ -502,10 +507,12 @@ MostVisitedSites::CreatePopularSitesSections(
     size_t num_actual_tiles) {
   std::map<SectionType, NTPTilesVector> sections = {
       std::make_pair(SectionType::PERSONALIZED, NTPTilesVector())};
+#if BUILDFLAG(ENABLE_SUPERVISED_USERS)
   // For child accounts popular sites tiles will not be added.
-  if (supervisor_ && supervisor_->IsChildProfile()) {
+  if (supervised_user::IsSubjectToParentalControls(*prefs_)) {
     return sections;
   }
+#endif
 
   if (!popular_sites_ || !ShouldShowPopularSites()) {
     return sections;
@@ -571,7 +578,7 @@ NTPTilesVector MostVisitedSites::CreatePopularSitesTiles(
 
 void MostVisitedSites::OnHomepageTitleDetermined(
     NTPTilesVector tiles,
-    const absl::optional<std::u16string>& title) {
+    const std::optional<std::u16string>& title) {
   if (!title.has_value())
     return;  // If there is no title, the most recent tile was already sent out.
 
@@ -622,19 +629,6 @@ NTPTilesVector MostVisitedSites::InsertHomeTile(
   return new_tiles;
 }
 
-absl::optional<NTPTile> MostVisitedSites::CreateExploreSitesTile() {
-  if (!explore_sites_client_)
-    return absl::nullopt;
-
-  NTPTile explore_sites_tile;
-  explore_sites_tile.url = explore_sites_client_->GetExploreSitesUrl();
-  explore_sites_tile.title = explore_sites_client_->GetExploreSitesTitle();
-  explore_sites_tile.source = TileSource::EXPLORE;
-  explore_sites_tile.title_source = TileTitleSource::UNKNOWN;
-
-  return explore_sites_tile;
-}
-
 void MostVisitedSites::OnCustomLinksChanged() {
   DCHECK(custom_links_);
   if (!IsCustomLinksEnabled())
@@ -659,8 +653,12 @@ void MostVisitedSites::BuildCustomLinks(
   size_t num_tiles = std::min(links.size(), kMaxNumCustomLinks);
   for (size_t i = 0; i < num_tiles; ++i) {
     const CustomLinksManager::Link& link = links.at(i);
-    if (supervisor_ && supervisor_->IsBlocked(link.url))
+#if BUILDFLAG(ENABLE_SUPERVISED_USERS)
+    if (supervised_user_service_ &&
+        supervised_user_service_->IsBlockedURL(link.url)) {
       continue;
+    }
+#endif
 
     NTPTile tile;
     tile.title = link.title;
@@ -696,15 +694,8 @@ void MostVisitedSites::InitiateNotificationForNewTiles(
 void MostVisitedSites::MergeMostVisitedTiles(NTPTilesVector personal_tiles) {
   std::set<std::string> used_hosts;
 
-  absl::optional<NTPTile> explore_tile = CreateExploreSitesTile();
-  size_t num_actual_tiles = explore_tile ? 1 : 0;
+  size_t num_actual_tiles = 0;
 
-  // The explore sites tile may have taken a space that was utilized by the
-  // personal tiles.
-  if (!personal_tiles.empty() &&
-      personal_tiles.size() + num_actual_tiles > GetMaxNumSites()) {
-    personal_tiles.pop_back();
-  }
   AddToHostsAndTotalCount(personal_tiles, &used_hosts, &num_actual_tiles);
 
   std::map<SectionType, NTPTilesVector> sections =
@@ -714,7 +705,7 @@ void MostVisitedSites::MergeMostVisitedTiles(NTPTilesVector personal_tiles) {
 
   NTPTilesVector new_tiles =
       MergeTiles(std::move(personal_tiles),
-                 std::move(sections[SectionType::PERSONALIZED]), explore_tile);
+                 std::move(sections[SectionType::PERSONALIZED]));
 
   SaveTilesAndNotify(std::move(new_tiles), std::move(sections));
 }
@@ -776,29 +767,20 @@ bool MostVisitedSites::WasNtpAppMigratedToWebApp(PrefService* prefs, GURL url) {
 
 NTPTilesVector MostVisitedSites::RemoveInvalidPreinstallApps(
     NTPTilesVector new_tiles) {
-  new_tiles.erase(
-      std::remove_if(new_tiles.begin(), new_tiles.end(),
-                     [this](NTPTile ntp_tile) {
-                       return MostVisitedSites::IsNtpTileFromPreinstalledApp(
-                                  ntp_tile.url) &&
-                              MostVisitedSites::WasNtpAppMigratedToWebApp(
-                                  prefs_, ntp_tile.url);
-                     }),
-      new_tiles.end());
+  std::erase_if(new_tiles, [this](NTPTile ntp_tile) {
+    return MostVisitedSites::IsNtpTileFromPreinstalledApp(ntp_tile.url) &&
+           MostVisitedSites::WasNtpAppMigratedToWebApp(prefs_, ntp_tile.url);
+  });
   return new_tiles;
 }
 
-NTPTilesVector MostVisitedSites::MergeTiles(
-    NTPTilesVector personal_tiles,
-    NTPTilesVector popular_tiles,
-    absl::optional<NTPTile> explore_tile) {
+NTPTilesVector MostVisitedSites::MergeTiles(NTPTilesVector personal_tiles,
+                                            NTPTilesVector popular_tiles) {
   NTPTilesVector merged_tiles;
   std::move(personal_tiles.begin(), personal_tiles.end(),
             std::back_inserter(merged_tiles));
   std::move(popular_tiles.begin(), popular_tiles.end(),
             std::back_inserter(merged_tiles));
-  if (explore_tile)
-    merged_tiles.push_back(*explore_tile);
 
   return merged_tiles;
 }

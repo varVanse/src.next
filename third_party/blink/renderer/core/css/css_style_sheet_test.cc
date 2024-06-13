@@ -1,4 +1,4 @@
-// Copyright 2018 The Chromium Authors. All rights reserved.
+// Copyright 2018 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -17,6 +17,7 @@
 #include "third_party/blink/renderer/core/css/css_rule.h"
 #include "third_party/blink/renderer/core/css/css_rule_list.h"
 #include "third_party/blink/renderer/core/css/media_list.h"
+#include "third_party/blink/renderer/core/css/properties/longhands.h"
 #include "third_party/blink/renderer/core/css/style_sheet_contents.h"
 #include "third_party/blink/renderer/core/dom/node_computed_style.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
@@ -56,9 +57,9 @@ TEST_F(CSSStyleSheetTest,
        GarbageCollectedShadowRootsRemovedFromAdoptedTreeScopes) {
   SetBodyInnerHTML("<div id='host_a'></div><div id='host_b'></div>");
   auto* host_a = GetElementById("host_a");
-  auto& shadow_a = host_a->AttachShadowRootInternal(ShadowRootType::kOpen);
+  auto& shadow_a = host_a->AttachShadowRootForTesting(ShadowRootMode::kOpen);
   auto* host_b = GetElementById("host_b");
-  auto& shadow_b = host_b->AttachShadowRootInternal(ShadowRootType::kOpen);
+  auto& shadow_b = host_b->AttachShadowRootForTesting(ShadowRootMode::kOpen);
   DummyExceptionStateForTesting exception_state;
   CSSStyleSheetInit* init = CSSStyleSheetInit::Create();
   CSSStyleSheet* sheet =
@@ -82,8 +83,8 @@ TEST_F(CSSStyleSheetTest,
 TEST_F(CSSStyleSheetTest, AdoptedStyleSheetMediaQueryEvalChange) {
   SetBodyInnerHTML("<div id=green></div><div id=blue></div>");
 
-  Element* green = GetDocument().getElementById("green");
-  Element* blue = GetDocument().getElementById("blue");
+  Element* green = GetDocument().getElementById(AtomicString("green"));
+  Element* blue = GetDocument().getElementById(AtomicString("blue"));
 
   CSSStyleSheetInit* init = CSSStyleSheetInit::Create();
   CSSStyleSheet* sheet =

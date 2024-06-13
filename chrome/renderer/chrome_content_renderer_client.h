@@ -11,10 +11,12 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/gtest_prod_util.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/task/single_thread_task_runner.h"
 #include "build/build_config.h"
 #include "chrome/common/media/webrtc_logging.mojom.h"
 #include "chrome/services/speech/buildflags/buildflags.h"
@@ -25,6 +27,7 @@
 #include "content/public/renderer/render_thread.h"
 #include "extensions/buildflags/buildflags.h"
 #include "ipc/ipc_channel_proxy.h"
+#include "media/base/key_systems_support_registration.h"
 #include "media/media_buildflags.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
 #include "mojo/public/cpp/bindings/generic_pending_receiver.h"
@@ -63,12 +66,18 @@ namespace content {
 struct WebPluginInfo;
 }  // namespace content
 
+#if BUILDFLAG(ENABLE_NACL)
 namespace extensions {
 class Extension;
 }
+#endif
 
 namespace subresource_filter {
 class UnverifiedRulesetDealer;
+}
+
+namespace url {
+class Origin;
 }
 
 namespace web_cache {
@@ -134,8 +143,10 @@ class ChromeContentRendererClient
       base::SingleThreadTaskRunner* compositor_thread_task_runner) override;
   bool RunIdleHandlerWhenWidgetsHidden() override;
   bool AllowPopup() override;
-  blink::ProtocolHandlerSecurityLevel GetProtocolHandlerSecurityLevel()
-      override;
+  bool ShouldNotifyServiceWorkerOnWebSocketActivity(
+      v8::Local<v8::Context> context) override;
+  blink::ProtocolHandlerSecurityLevel GetProtocolHandlerSecurityLevel(
+      const url::Origin& origin) override;
   void WillSendRequest(blink::WebLocalFrame* frame,
                        ui::PageTransition transition_type,
                        const blink::WebURL& url,
@@ -143,7 +154,7 @@ class ChromeContentRendererClient
                        const url::Origin* initiator_origin,
                        GURL* new_url) override;
   bool IsPrefetchOnly(content::RenderFrame* render_frame) override;
-  uint64_t VisitedLinkHash(const char* canonical_url, size_t length) override;
+  uint64_t VisitedLinkHash(std::string_view canonical_url) override;
   bool IsLinkVisited(uint64_t link_hash) override;
   std::unique_ptr<blink::WebPrescientNetworking> CreatePrescientNetworking(
       content::RenderFrame* render_frame) override;
@@ -158,10 +169,11 @@ class ChromeContentRendererClient
       content::RenderFrame* render_frame) override;
 #if BUILDFLAG(ENABLE_SPEECH_SERVICE)
   std::unique_ptr<media::SpeechRecognitionClient> CreateSpeechRecognitionClient(
-      content::RenderFrame* render_frame,
-      media::SpeechRecognitionClient::OnReadyCallback callback) override;
+      content::RenderFrame* render_frame) override;
 #endif  // BUILDFLAG(ENABLE_SPEECH_SERVICE)
-  void GetSupportedKeySystems(media::GetSupportedKeySystemsCB cb) override;
+  std::unique_ptr<media::KeySystemSupportRegistration> GetSupportedKeySystems(
+      content::RenderFrame* render_frame,
+      media::GetSupportedKeySystemsCB cb) override;
   bool IsPluginAllowedToUseCameraDeviceAPI(const GURL& url) override;
   void RunScriptsAtDocumentStart(content::RenderFrame* render_frame) override;
   void RunScriptsAtDocumentEnd(content::RenderFrame* render_frame) override;
@@ -201,11 +213,10 @@ class ChromeContentRendererClient
   void AppendContentSecurityPolicy(
       const blink::WebURL& url,
       blink::WebVector<blink::WebContentSecurityPolicyHeader>* csp) override;
+  std::unique_ptr<blink::WebLinkPreviewTriggerer> CreateLinkPreviewTriggerer()
+      override;
 
 #if BUILDFLAG(ENABLE_PLUGINS)
-  static mojo::AssociatedRemote<chrome::mojom::PluginInfoHost>&
-  GetPluginInfoHost();
-
   static blink::WebPlugin* CreatePlugin(
       content::RenderFrame* render_frame,
       const blink::WebPluginParams& params,
@@ -252,8 +263,7 @@ class ChromeContentRendererClient
                                   bool is_nacl_unrestricted,
                                   const extensions::Extension* extension);
   static void ReportNaClAppType(bool is_pnacl,
-                                bool is_extension_or_app,
-                                bool is_hosted_app);
+                                const extensions::Extension* extension);
 #endif
 
 #if BUILDFLAG(IS_WIN)

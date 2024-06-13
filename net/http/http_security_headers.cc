@@ -3,11 +3,11 @@
 // found in the LICENSE file.
 
 #include <limits>
+#include <string_view>
 
 #include "base/base64.h"
 #include "base/check_op.h"
 #include "base/notreached.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_tokenizer.h"
 #include "base/strings/string_util.h"
 #include "net/base/parse_number.h"
@@ -25,9 +25,9 @@ enum MaxAgeParsing { REQUIRE_MAX_AGE, DO_NOT_REQUIRE_MAX_AGE };
 // seconds into a uint32_t. The string may contain an arbitrarily large number,
 // which will be clipped to a supplied limit and which is guaranteed to fit
 // within a 32-bit unsigned integer. False is returned on any parse error.
-bool MaxAgeToLimitedInt(base::StringPiece s, uint32_t limit, uint32_t* result) {
+bool MaxAgeToLimitedInt(std::string_view s, uint32_t limit, uint32_t* result) {
   ParseIntError error;
-  if (!ParseUint32(s, result, &error)) {
+  if (!ParseUint32(s, ParseIntFormat::NON_NEGATIVE, result, &error)) {
     if (error == ParseIntError::FAILED_OVERFLOW) {
       *result = limit;
     } else {
@@ -95,7 +95,7 @@ bool ParseHSTSHeader(const std::string& value,
   tokenizer.set_quote_chars("\"");
   std::string unquoted;
   while (tokenizer.GetNext()) {
-    base::StringPiece token = tokenizer.token_piece();
+    std::string_view token = tokenizer.token_piece();
     DCHECK(!tokenizer.token_is_delim() || token.length() == 1);
     switch (state) {
       case START:
@@ -174,74 +174,6 @@ bool ParseHSTSHeader(const std::string& value,
       NOTREACHED();
       return false;
   }
-}
-
-// "Expect-CT" ":"
-//     "max-age" "=" delta-seconds
-//     [ "," "enforce" ]
-//     [ "," "report-uri" "=" absolute-URI ]
-bool ParseExpectCTHeader(const std::string& value,
-                         base::TimeDelta* max_age,
-                         bool* enforce,
-                         GURL* report_uri) {
-  bool parsed_max_age = false;
-  bool enforce_candidate = false;
-  bool has_report_uri = false;
-  uint32_t max_age_candidate = 0;
-  GURL parsed_report_uri;
-
-  HttpUtil::NameValuePairsIterator name_value_pairs(
-      value.begin(), value.end(), ',',
-      HttpUtil::NameValuePairsIterator::Values::NOT_REQUIRED,
-      // Use STRICT_QUOTES because "UAs must not attempt to fix malformed header
-      // fields."
-      HttpUtil::NameValuePairsIterator::Quotes::STRICT_QUOTES);
-
-  while (name_value_pairs.GetNext()) {
-    base::StringPiece name = name_value_pairs.name_piece();
-    if (base::EqualsCaseInsensitiveASCII(name, "max-age")) {
-      // "A given directive MUST NOT appear more than once in a given header
-      // field."
-      if (parsed_max_age)
-        return false;
-      if (!MaxAgeToLimitedInt(name_value_pairs.value_piece(),
-                              kMaxExpectCTAgeSecs, &max_age_candidate)) {
-        return false;
-      }
-      parsed_max_age = true;
-    } else if (base::EqualsCaseInsensitiveASCII(name, "enforce")) {
-      // "A given directive MUST NOT appear more than once in a given header
-      // field."
-      if (enforce_candidate)
-        return false;
-      if (!name_value_pairs.value_piece().empty())
-        return false;
-      enforce_candidate = true;
-    } else if (base::EqualsCaseInsensitiveASCII(name, "report-uri")) {
-      // "A given directive MUST NOT appear more than once in a given header
-      // field."
-      if (has_report_uri)
-        return false;
-
-      has_report_uri = true;
-      parsed_report_uri = GURL(name_value_pairs.value_piece());
-      if (parsed_report_uri.is_empty() || !parsed_report_uri.is_valid())
-        return false;
-    } else {
-      // Silently ignore unknown directives for forward compatibility.
-    }
-  }
-
-  if (!name_value_pairs.valid())
-    return false;
-
-  if (!parsed_max_age)
-    return false;
-
-  *max_age = base::Seconds(max_age_candidate);
-  *enforce = enforce_candidate;
-  *report_uri = parsed_report_uri;
-  return true;
 }
 
 }  // namespace net

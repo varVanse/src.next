@@ -5,6 +5,7 @@
 #include "base/observer_list.h"
 
 #include <memory>
+#include <optional>
 
 #include "base/memory/raw_ptr.h"
 #include "base/strings/string_piece.h"
@@ -13,7 +14,6 @@
 #include "build/build_config.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 namespace {
@@ -122,7 +122,7 @@ template <class ObserverListType>
 class ObserverListCreator : public DelegateSimpleThread::Delegate {
  public:
   std::unique_ptr<ObserverListType> Create(
-      absl::optional<base::ObserverListPolicy> policy = absl::nullopt) {
+      std::optional<base::ObserverListPolicy> policy = std::nullopt) {
     policy_ = policy;
     DelegateSimpleThread thread(this, "ListCreator");
     thread.Start();
@@ -140,7 +140,7 @@ class ObserverListCreator : public DelegateSimpleThread::Delegate {
   }
 
   std::unique_ptr<ObserverListType> observer_list_;
-  absl::optional<base::ObserverListPolicy> policy_;
+  std::optional<base::ObserverListPolicy> policy_;
 };
 
 }  // namespace
@@ -553,7 +553,7 @@ class ListDestructor : public Foo {
   explicit ListDestructor(ObserverListType* list) : list_(list) {}
   ~ListDestructor() override = default;
 
-  void Observe(int x) override { delete list_; }
+  void Observe(int x) override { delete list_.ExtractAsDangling(); }
 
  private:
   raw_ptr<ObserverListType> list_;
@@ -819,8 +819,8 @@ TYPED_TEST(ObserverListTest, NonCompactList) {
   ObserverListFoo observer_list;
   Adder a(1), b(-1);
 
+  Disrupter disrupter2(&observer_list, true);  // Must outlive `disrupter1`.
   Disrupter disrupter1(&observer_list, true);
-  Disrupter disrupter2(&observer_list, true);
 
   // Disrupt itself and another one.
   disrupter1.SetDoomed(&disrupter2);
@@ -848,8 +848,8 @@ TYPED_TEST(ObserverListTest, BecomesEmptyThanNonEmpty) {
   ObserverListFoo observer_list;
   Adder a(1), b(-1);
 
+  Disrupter disrupter2(&observer_list, true);  // Must outlive `disrupter1`.
   Disrupter disrupter1(&observer_list, true);
-  Disrupter disrupter2(&observer_list, true);
 
   // Disrupt itself and another one.
   disrupter1.SetDoomed(&disrupter2);

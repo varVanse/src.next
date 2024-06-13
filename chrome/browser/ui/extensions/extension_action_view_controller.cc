@@ -8,31 +8,32 @@
 #include <string>
 #include <utility>
 
-#include "base/bind.h"
 #include "base/check_op.h"
 #include "base/feature_list.h"
+#include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/strcat.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/extensions/api/commands/command_service.h"
-#include "chrome/browser/extensions/api/extension_action/extension_action_api.h"
+#include "chrome/browser/extensions/api/side_panel/side_panel_service.h"
 #include "chrome/browser/extensions/extension_action_runner.h"
+#include "chrome/browser/extensions/extension_context_menu_model.h"
 #include "chrome/browser/extensions/extension_view.h"
 #include "chrome/browser/extensions/extension_view_host.h"
 #include "chrome/browser/extensions/extension_view_host_factory.h"
-#include "chrome/browser/extensions/site_permissions_helper.h"
+#include "chrome/browser/extensions/permissions/site_permissions_helper.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/extensions/extension_action_platform_delegate.h"
 #include "chrome/browser/ui/extensions/extension_popup_types.h"
+#include "chrome/browser/ui/extensions/extension_side_panel_utils.h"
 #include "chrome/browser/ui/extensions/extensions_container.h"
 #include "chrome/browser/ui/extensions/icon_with_badge_image_source.h"
 #include "chrome/browser/ui/toolbar/toolbar_action_view_delegate.h"
 #include "chrome/grit/generated_resources.h"
 #include "components/sessions/content/session_tab_helper.h"
 #include "content/public/browser/web_contents.h"
-#include "extensions/browser/blocked_action_type.h"
 #include "extensions/browser/extension_action.h"
 #include "extensions/browser/extension_action_manager.h"
 #include "extensions/browser/extension_registry.h"
@@ -40,22 +41,87 @@
 #include "extensions/common/extension.h"
 #include "extensions/common/extension_features.h"
 #include "extensions/common/manifest_constants.h"
-#include "extensions/common/permissions/api_permission.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/models/image_model.h"
 #include "ui/color/color_provider_manager.h"
 #include "ui/gfx/image/image_skia.h"
-#include "ui/gfx/image/image_skia_operations.h"
 #include "ui/native_theme/native_theme.h"
 
 using extensions::ActionInfo;
 using extensions::CommandService;
 using extensions::ExtensionActionRunner;
+using extensions::PermissionsManager;
 
 namespace {
 
 void RecordInvocationSource(
     ToolbarActionViewController::InvocationSource source) {
   base::UmaHistogramEnumeration("Extensions.Toolbar.InvocationSource", source);
+}
+
+// Computes hover card site access status based on:
+// 1. Extension wants site access: user site settings takes precedence
+// over the extension's site access.
+// 2. Extension does not want access: if all extensions are blocked display
+// such message because a) user could wrongly infer that an extension that
+// does not want access has access if we only show the blocked message for
+// extensions that want access; and b) it helps us work around tricky
+// calculations where we get into collisions between withheld and denied
+// permission. Otherwise, it should display "does not want access".
+ExtensionActionViewController::HoverCardState::SiteAccess
+GetHoverCardSiteAccessState(
+    extensions::PermissionsManager::UserSiteSetting site_setting,
+    extensions::SitePermissionsHelper::SiteInteraction site_interaction) {
+  switch (site_interaction) {
+    case extensions::SitePermissionsHelper::SiteInteraction::kGranted:
+      return site_setting == extensions::PermissionsManager::UserSiteSetting::
+                                 kGrantAllExtensions
+                 ? ExtensionActionViewController::HoverCardState::SiteAccess::
+                       kAllExtensionsAllowed
+                 : ExtensionActionViewController::HoverCardState::SiteAccess::
+                       kExtensionHasAccess;
+
+    case extensions::SitePermissionsHelper::SiteInteraction::kWithheld:
+    case extensions::SitePermissionsHelper::SiteInteraction::kActiveTab:
+      return site_setting == extensions::PermissionsManager::UserSiteSetting::
+                                 kBlockAllExtensions
+                 ? ExtensionActionViewController::HoverCardState::SiteAccess::
+                       kAllExtensionsBlocked
+                 : ExtensionActionViewController::HoverCardState::SiteAccess::
+                       kExtensionRequestsAccess;
+
+    case extensions::SitePermissionsHelper::SiteInteraction::kNone:
+      // kNone site interaction includes extensions that don't want access when
+      // user site setting is "block all extensions".
+      return site_setting == extensions::PermissionsManager::UserSiteSetting::
+                                 kBlockAllExtensions
+                 ? ExtensionActionViewController::HoverCardState::SiteAccess::
+                       kAllExtensionsBlocked
+                 : ExtensionActionViewController::HoverCardState::SiteAccess::
+                       kExtensionDoesNotWantAccess;
+  }
+}
+
+// Computes hover card policy status based on admin policy. Note that an
+// extension pinned by admin is also installed by admin. Thus, "pinned by admin"
+// has preference.
+ExtensionActionViewController::HoverCardState::AdminPolicy
+GetHoverCardPolicyState(Browser* browser,
+                        const extensions::ExtensionId& extension_id) {
+  auto* const model = ToolbarActionsModel::Get(browser->profile());
+  if (model->IsActionForcePinned(extension_id))
+    return ExtensionActionViewController::HoverCardState::AdminPolicy::
+        kPinnedByAdmin;
+
+  scoped_refptr<const extensions::Extension> extension =
+      extensions::ExtensionRegistry::Get(browser->profile())
+          ->enabled_extensions()
+          .GetByID(extension_id);
+  if (extensions::Manifest::IsPolicyLocation(extension->location()))
+    return ExtensionActionViewController::HoverCardState::AdminPolicy::
+        kInstalledByAdmin;
+
+  return ExtensionActionViewController::HoverCardState::AdminPolicy::kNone;
 }
 
 }  // namespace
@@ -136,13 +202,13 @@ void ExtensionActionViewController::SetDelegate(
   }
 }
 
-gfx::Image ExtensionActionViewController::GetIcon(
+ui::ImageModel ExtensionActionViewController::GetIcon(
     content::WebContents* web_contents,
     const gfx::Size& size) {
   if (!ExtensionIsValid())
-    return gfx::Image();
+    return ui::ImageModel();
 
-  return gfx::Image(
+  return ui::ImageModel::FromImageSkia(
       gfx::ImageSkia(GetIconImageSource(web_contents, size), size));
 }
 
@@ -151,6 +217,17 @@ std::u16string ExtensionActionViewController::GetActionName() const {
     return std::u16string();
 
   return base::UTF8ToUTF16(extension_->name());
+}
+
+std::u16string ExtensionActionViewController::GetActionTitle(
+    content::WebContents* web_contents) const {
+  if (!ExtensionIsValid()) {
+    return std::u16string();
+  }
+
+  std::string title = extension_action_->GetTitle(
+      sessions::SessionTabHelper::IdForTab(web_contents).id());
+  return base::UTF8ToUTF16(title);
 }
 
 std::u16string ExtensionActionViewController::GetAccessibleName(
@@ -163,11 +240,9 @@ std::u16string ExtensionActionViewController::GetAccessibleName(
   if (!web_contents)
     return base::UTF8ToUTF16(extension()->name());
 
-  std::string title = extension_action()->GetTitle(
-      sessions::SessionTabHelper::IdForTab(web_contents).id());
-
-  std::u16string title_utf16 =
-      base::UTF8ToUTF16(title.empty() ? extension()->name() : title);
+  std::u16string action_title = GetActionTitle(web_contents);
+  std::u16string accessible_name =
+      action_title.empty() ? GetActionName() : action_title;
 
   // Include a "host access" portion of the tooltip if the extension has active
   // or pending interaction with the site.
@@ -187,43 +262,99 @@ std::u16string ExtensionActionViewController::GetAccessibleName(
   }
 
   if (site_interaction_description_id != -1) {
-    title_utf16 = base::StrCat(
-        {title_utf16, u"\n",
+    accessible_name = base::StrCat(
+        {accessible_name, u"\n",
          l10n_util::GetStringUTF16(site_interaction_description_id)});
   }
 
-  return title_utf16;
+  return accessible_name;
 }
 
 std::u16string ExtensionActionViewController::GetTooltip(
     content::WebContents* web_contents) const {
+  if (base::FeatureList::IsEnabled(
+          extensions_features::kExtensionsMenuAccessControl)) {
+    std::u16string action_title = GetActionTitle(web_contents);
+    std::u16string tooltip =
+        action_title.empty() ? GetActionName() : action_title;
+
+    url::Origin origin =
+        web_contents->GetPrimaryMainFrame()->GetLastCommittedOrigin();
+    auto* permissions_manager =
+        extensions::PermissionsManager::Get(browser_->profile());
+    ToolbarActionViewController::HoverCardState::SiteAccess site_access =
+        GetHoverCardSiteAccessState(
+            permissions_manager->GetUserSiteSetting(origin),
+            GetSiteInteraction(web_contents));
+
+    int tooltip_site_access_id;
+    switch (site_access) {
+      case HoverCardState::SiteAccess::kAllExtensionsAllowed:
+      case HoverCardState::SiteAccess::kExtensionHasAccess:
+        tooltip_site_access_id =
+            IDS_EXTENSIONS_MENU_MAIN_PAGE_EXTENSION_BUTTON_HAS_ACCESS_TOOLTIP;
+        break;
+      case HoverCardState::SiteAccess::kAllExtensionsBlocked:
+        tooltip_site_access_id =
+            IDS_EXTENSIONS_MENU_MAIN_PAGE_EXTENSION_BUTTON_BLOCKED_ACCESS_TOOLTIP;
+        break;
+      case HoverCardState::SiteAccess::kExtensionRequestsAccess:
+        tooltip_site_access_id =
+            IDS_EXTENSIONS_MENU_MAIN_PAGE_EXTENSION_BUTTON_REQUESTS_TOOLTIP;
+        break;
+      case HoverCardState::SiteAccess::kExtensionDoesNotWantAccess:
+        tooltip_site_access_id = -1;
+    }
+
+    return tooltip_site_access_id == -1
+               ? tooltip
+               : base::JoinString({tooltip, l10n_util::GetStringUTF16(
+                                                tooltip_site_access_id)},
+                                  u"\n");
+  }
+
   return GetAccessibleName(web_contents);
 }
 
 bool ExtensionActionViewController::IsEnabled(
     content::WebContents* web_contents) const {
-  if (!ExtensionIsValid())
+  if (!ExtensionIsValid()) {
     return false;
+  }
+
+  int tab_id = sessions::SessionTabHelper::IdForTab(web_contents).id();
+  if (extension_action_->GetIsVisible(tab_id)) {
+    return true;
+  }
 
   extensions::SitePermissionsHelper::SiteInteraction site_interaction =
       GetSiteInteraction(web_contents);
+  if (site_interaction ==
+          extensions::SitePermissionsHelper::SiteInteraction::kWithheld ||
+      site_interaction ==
+          extensions::SitePermissionsHelper::SiteInteraction::kActiveTab) {
+    return true;
+  }
 
-  return extension_action_->GetIsVisible(
-             sessions::SessionTabHelper::IdForTab(web_contents).id()) ||
-         site_interaction ==
-             extensions::SitePermissionsHelper::SiteInteraction::kWithheld ||
-         site_interaction ==
-             extensions::SitePermissionsHelper::SiteInteraction::kActiveTab;
+  extensions::SidePanelService* side_panel_service =
+      extensions::SidePanelService::Get(browser_->profile());
+  return side_panel_service &&
+         side_panel_service->HasSidePanelActionForTab(*extension(), tab_id);
 }
 
 bool ExtensionActionViewController::IsShowingPopup() const {
   return popup_host_ != nullptr;
 }
 
-bool ExtensionActionViewController::IsRequestingSiteAccess(
+bool ExtensionActionViewController::ShouldShowSiteAccessRequestInToolbar(
     content::WebContents* web_contents) const {
-  return GetSiteInteraction(web_contents) ==
-         extensions::SitePermissionsHelper::SiteInteraction::kWithheld;
+  bool requests_access =
+      GetSiteInteraction(web_contents) ==
+      extensions::SitePermissionsHelper::SiteInteraction::kWithheld;
+  bool can_show_access_requests_in_toolbar =
+      extensions::SitePermissionsHelper(browser_->profile())
+          .ShowAccessRequestsInToolbar(GetId());
+  return requests_access && can_show_access_requests_in_toolbar;
 }
 
 void ExtensionActionViewController::HidePopup() {
@@ -251,24 +382,31 @@ ui::MenuModel* ExtensionActionViewController::GetContextMenu(
   if (!ExtensionIsValid())
     return nullptr;
 
-  ToolbarActionViewController* const action =
-      extensions_container_->GetActionForId(GetId());
-  extensions::ExtensionContextMenuModel::ButtonVisibility visibility =
-      extensions_container_->GetActionVisibility(action);
+  bool is_pinned =
+      ToolbarActionsModel::Get(browser_->profile())->IsActionPinned(GetId());
 
   // Reconstruct the menu every time because the menu's contents are dynamic.
   context_menu_model_ = std::make_unique<extensions::ExtensionContextMenuModel>(
-      extension(), browser_, visibility, this,
-      view_delegate_->CanShowIconInToolbar(), context_menu_source);
+      extension(), browser_, is_pinned, this,
+      ToolbarActionsModel::CanShowActionsInToolbar(*browser_),
+      context_menu_source);
   return context_menu_model_.get();
 }
 
-void ExtensionActionViewController::OnContextMenuShown() {
-  extensions_container_->OnContextMenuShown(this);
+void ExtensionActionViewController::OnContextMenuShown(
+    extensions::ExtensionContextMenuModel::ContextMenuSource source) {
+  if (source == extensions::ExtensionContextMenuModel::ContextMenuSource::
+                    kToolbarAction) {
+    extensions_container_->OnContextMenuShownFromToolbar(GetId());
+  }
 }
 
-void ExtensionActionViewController::OnContextMenuClosed() {
-  extensions_container_->OnContextMenuClosed(this);
+void ExtensionActionViewController::OnContextMenuClosed(
+    extensions::ExtensionContextMenuModel::ContextMenuSource source) {
+  if (source == extensions::ExtensionContextMenuModel::ContextMenuSource::
+                    kToolbarAction) {
+    extensions_container_->OnContextMenuClosedFromToolbar();
+  }
 }
 
 void ExtensionActionViewController::ExecuteUserAction(InvocationSource source) {
@@ -295,11 +433,16 @@ void ExtensionActionViewController::ExecuteUserAction(InvocationSource source) {
   // This method is only called to execute an action by the user, so we can
   // always grant tab permissions.
   constexpr bool kGrantTabPermissions = true;
-  if (action_runner->RunAction(extension(), kGrantTabPermissions) ==
-      extensions::ExtensionAction::ACTION_SHOW_POPUP) {
+  extensions::ExtensionAction::ShowAction action =
+      action_runner->RunAction(extension(), kGrantTabPermissions);
+
+  if (action == extensions::ExtensionAction::ACTION_SHOW_POPUP) {
     constexpr bool kByUser = true;
     GetPreferredPopupViewController()->TriggerPopup(
         PopupShowAction::kShow, kByUser, ShowPopupCallback());
+  } else if (action == extensions::ExtensionAction::ACTION_TOGGLE_SIDE_PANEL) {
+    extensions::side_panel_util::ToggleExtensionSidePanel(browser_,
+                                                          extension()->id());
   }
 }
 
@@ -393,39 +536,14 @@ ExtensionActionViewController::GetHoverCardState(
   extensions::PermissionsManager::UserSiteSetting site_setting =
       extensions::PermissionsManager::Get(browser_->profile())
           ->GetUserSiteSetting(origin);
-
-  // Compute hover card status based on:
-  // 1. Extension wants site access: user site settings takes precedence
-  // over the extension's site access.
-  // 2. Extension does not want access: if all extensions are blocked display
-  // such message because a) user could wrongly infer that an extension that
-  // does not want access has access if we only show the blocked message for
-  // extensions that want access; and b) it helps us work around tricky
-  // calculations where we get into collisions between withheld and denied
-  // permission. Otherwise, it should display "does not want access".
   auto site_interaction = GetSiteInteraction(web_contents);
-  switch (site_interaction) {
-    case extensions::SitePermissionsHelper::SiteInteraction::kGranted:
-      return site_setting == extensions::PermissionsManager::UserSiteSetting::
-                                 kGrantAllExtensions
-                 ? HoverCardState::kAllExtensionsAllowed
-                 : HoverCardState::kExtensionHasAccess;
 
-    case extensions::SitePermissionsHelper::SiteInteraction::kWithheld:
-    case extensions::SitePermissionsHelper::SiteInteraction::kActiveTab:
-      return site_setting == extensions::PermissionsManager::UserSiteSetting::
-                                 kBlockAllExtensions
-                 ? HoverCardState::kAllExtensionsBlocked
-                 : HoverCardState::kExtensionRequestsAccess;
+  HoverCardState state;
+  state.site_access =
+      GetHoverCardSiteAccessState(site_setting, site_interaction);
+  state.policy = GetHoverCardPolicyState(browser_, GetId());
 
-    case extensions::SitePermissionsHelper::SiteInteraction::kNone:
-      // kNone site interaction includes extensions that don't want access when
-      // user site setting is "block all extensions".
-      return site_setting == extensions::PermissionsManager::UserSiteSetting::
-                                 kBlockAllExtensions
-                 ? HoverCardState::kAllExtensionsBlocked
-                 : HoverCardState::kExtensionDoesNotWantAccess;
-  }
+  return state;
 }
 
 bool ExtensionActionViewController::CanHandleAccelerators() const {
@@ -458,12 +576,6 @@ ExtensionActionViewController::GetIconImageSourceForTesting(
   return GetIconImageSource(web_contents, size);
 }
 
-bool ExtensionActionViewController::HasBeenBlockedForTesting(
-    content::WebContents* web_contents) const {
-  return extensions::SitePermissionsHelper(browser_->profile())
-      .HasBeenBlocked(*extension(), web_contents);
-}
-
 ExtensionActionViewController*
 ExtensionActionViewController::GetPreferredPopupViewController() {
   return static_cast<ExtensionActionViewController*>(
@@ -484,6 +596,12 @@ void ExtensionActionViewController::TriggerPopup(PopupShowAction show_action,
 
   const GURL popup_url = extension_action_->GetPopupUrl(tab_id);
 
+  // Skip popup if there is an open security UI that would be covered by it,
+  // mitigation occlusion/spoofing risks.
+  if (extensions_container_->HasBlockingSecurityUI()) {
+    return;
+  }
+
   std::unique_ptr<extensions::ExtensionViewHost> host =
       extensions::ExtensionViewHostFactory::CreatePopupHost(popup_url,
                                                             browser_);
@@ -502,9 +620,9 @@ void ExtensionActionViewController::TriggerPopup(PopupShowAction show_action,
   extensions_container_->SetPopupOwner(this);
 
   extensions_container_->PopOutAction(
-      this, base::BindOnce(&ExtensionActionViewController::ShowPopup,
-                           weak_factory_.GetWeakPtr(), std::move(host), by_user,
-                           show_action, std::move(callback)));
+      GetId(), base::BindOnce(&ExtensionActionViewController::ShowPopup,
+                              weak_factory_.GetWeakPtr(), std::move(host),
+                              by_user, show_action, std::move(callback)));
 }
 
 void ExtensionActionViewController::ShowPopup(
@@ -536,8 +654,9 @@ void ExtensionActionViewController::OnPopupClosed() {
   popup_host_ = nullptr;
   has_opened_popup_ = false;
   extensions_container_->SetPopupOwner(nullptr);
-  if (extensions_container_->GetPoppedOutAction() == this)
+  if (extensions_container_->GetPoppedOutActionId() == GetId()) {
     extensions_container_->UndoPopOut();
+  }
   view_delegate_->OnPopupClosed();
 }
 
@@ -575,10 +694,16 @@ ExtensionActionViewController::GetIconImageSource(
   // We only grayscale the icon if it cannot interact with the page and the icon
   // is disabled.
   bool action_is_visible = extension_action_->GetIsVisible(tab_id);
+
+  extensions::SidePanelService* side_panel_service =
+      extensions::SidePanelService::Get(browser_->profile());
+  bool has_side_panel_action =
+      side_panel_service &&
+      side_panel_service->HasSidePanelActionForTab(*extension(), tab_id);
   bool grayscale =
       GetSiteInteraction(web_contents) ==
           extensions::SitePermissionsHelper::SiteInteraction::kNone &&
-      !action_is_visible;
+      !action_is_visible && !has_side_panel_action;
   image_source->set_grayscale(grayscale);
 
   if (base::FeatureList::IsEnabled(

@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -43,7 +43,7 @@ class CORE_EXPORT UrlMatcher final {
 
  private:
   using UrlList = Vector<
-      std::pair<scoped_refptr<const SecurityOrigin>, absl::optional<String>>>;
+      std::pair<scoped_refptr<const SecurityOrigin>, std::optional<String>>>;
   UrlList url_list_;
 
   void ParseFieldTrialParam(const base::StringPiece& encoded_url_list_string);

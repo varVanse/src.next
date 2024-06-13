@@ -26,7 +26,7 @@
 #include "mojo/public/cpp/system/invitation.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-#if defined(USE_OZONE)
+#if BUILDFLAG(IS_OZONE)
 #include "ui/ozone/public/ozone_switches.h"
 #endif
 
@@ -66,16 +66,15 @@ class LaunchAsMojoClientBrowserTest : public ContentBrowserTest {
   base::CommandLine MakeShellCommandLine() {
     base::CommandLine command_line(
         GetFilePathNextToCurrentExecutable(kShellExecutableName));
-    command_line.AppendSwitchPath(switches::kContentShellDataPath,
+    command_line.AppendSwitchPath(switches::kContentShellUserDataDir,
                                   temp_dir_.GetPath());
-#if defined(USE_OZONE)
+#if BUILDFLAG(IS_OZONE)
     const base::CommandLine& cmdline = *base::CommandLine::ForCurrentProcess();
-    const char* kSwitchesToCopy[] = {
+    static const char* const kSwitchesToCopy[] = {
         // Keep the kOzonePlatform switch that the Ozone must use.
         switches::kOzonePlatform,
     };
-    command_line.CopySwitchesFrom(cmdline, kSwitchesToCopy,
-                                  std::size(kSwitchesToCopy));
+    command_line.CopySwitchesFrom(cmdline, kSwitchesToCopy);
 #endif
 
 #if BUILDFLAG(IS_CHROMEOS_ASH)
@@ -156,6 +155,10 @@ class LaunchAsMojoClientBrowserTest : public ContentBrowserTest {
   mojo::Remote<mojom::ShellController> shell_controller_;
 };
 
+// TODO(http://crbug.com/323984075): This test invokes content_shell in a way
+// that is not supported on Lacros (without crosapi data). Figure out what to
+// do about that.
+#if !BUILDFLAG(IS_CHROMEOS_LACROS)
 IN_PROC_BROWSER_TEST_F(LaunchAsMojoClientBrowserTest, LaunchAndBindInterface) {
   // Verifies that we can launch an instance of Content Shell with a Mojo
   // invitation on the command line and reach the new browser process's exposed
@@ -172,7 +175,7 @@ IN_PROC_BROWSER_TEST_F(LaunchAsMojoClientBrowserTest, LaunchAndBindInterface) {
   base::RunLoop loop;
   shell_controller->GetSwitchValue(
       kExtraSwitchName,
-      base::BindLambdaForTesting([&](const absl::optional<std::string>& value) {
+      base::BindLambdaForTesting([&](const std::optional<std::string>& value) {
         ASSERT_TRUE(value);
         EXPECT_EQ(kExtraSwitchValue, *value);
         loop.Quit();
@@ -181,6 +184,7 @@ IN_PROC_BROWSER_TEST_F(LaunchAsMojoClientBrowserTest, LaunchAndBindInterface) {
 
   shell_controller->ShutDown();
 }
+#endif  // !BUILDFLAG(IS_CHROMEOS_LACROS)
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 // TODO(crbug.com/1259557): This test implementation fundamentally conflicts

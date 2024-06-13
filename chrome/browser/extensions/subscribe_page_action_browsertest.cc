@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
 #include "chrome/browser/extensions/extension_browsertest.h"
 #include "chrome/browser/ui/browser.h"
@@ -41,29 +41,21 @@ const char kInvalidFeed2[] = "/feeds/feed_invalid2.xml";
 const char kFeedTripleEncoded[] = "/feeds/url%25255Fdecoding.html";
 
 static const char kScriptFeedTitle[] =
-    "window.domAutomationController.send("
-    "  document.getElementById('title') ? "
-    "    document.getElementById('title').textContent : "
-    "    \"element 'title' not found\""
-    ");";
+    "document.getElementById('title') ? "
+    "  document.getElementById('title').textContent : "
+    "  \"element 'title' not found\"";
 static const char kScriptAnchor[] =
-    "window.domAutomationController.send("
-    "  document.getElementById('anchor_0') ? "
-    "    document.getElementById('anchor_0').textContent : "
-    "    \"element 'anchor_0' not found\""
-    ");";
+    "document.getElementById('anchor_0') ? "
+    "  document.getElementById('anchor_0').textContent : "
+    "  \"element 'anchor_0' not found\"";
 static const char kScriptDesc[] =
-    "window.domAutomationController.send("
-    "  document.getElementById('desc_0') ? "
-    "    document.getElementById('desc_0').textContent : "
-    "    \"element 'desc_0' not found\""
-    ");";
+    "document.getElementById('desc_0') ? "
+    "  document.getElementById('desc_0').textContent : "
+    "  \"element 'desc_0' not found\"";
 static const char kScriptError[] =
-    "window.domAutomationController.send("
-    "  document.getElementById('error') ? "
-    "    document.getElementById('error').textContent : "
-    "    \"No error\""
-    ");";
+    "document.getElementById('error') ? "
+    "  document.getElementById('error').textContent : "
+    "  \"No error\"";
 
 GURL GetFeedUrl(net::EmbeddedTestServer* server,
                 const std::string& feed_page,
@@ -111,6 +103,15 @@ class NamedFrameCreatedObserver : public content::WebContentsObserver {
     run_loop_.Quit();
   }
 
+  void RenderFrameDeleted(
+      content::RenderFrameHost* render_frame_host) override {
+    if (render_frame_host->GetFrameName() != frame_name_) {
+      return;
+    }
+
+    frame_ = nullptr;
+  }
+
   base::RunLoop run_loop_;
   raw_ptr<content::RenderFrameHost> frame_ = nullptr;
   std::string frame_name_;
@@ -119,15 +120,8 @@ class NamedFrameCreatedObserver : public content::WebContentsObserver {
 bool ValidatePageElement(content::RenderFrameHost* frame,
                          const std::string& javascript,
                          const std::string& expected_value) {
-  std::string returned_value;
-
-  if (!content::ExecuteScriptAndExtractString(frame,
-                                              javascript,
-                                              &returned_value))
-    return false;
-
-  EXPECT_STREQ(expected_value.c_str(), returned_value.c_str());
-  return expected_value == returned_value;
+  EXPECT_EQ(expected_value, content::EvalJs(frame, javascript));
+  return true;
 }
 
 // Navigates to a feed page and, if |sniff_xml_type| is set, wait for the
@@ -309,7 +303,9 @@ IN_PROC_BROWSER_TEST_F(ExtensionBrowserTest, RSSParseFeedInvalidFeed1) {
       "element 'desc_0' not found", "This feed contains no entries.", "Error");
 }
 
-IN_PROC_BROWSER_TEST_F(ExtensionBrowserTest, RSSParseFeedInvalidFeed2) {
+// TODO(https://crbug.com/331144174): Test is flaky across multiple builders.
+IN_PROC_BROWSER_TEST_F(ExtensionBrowserTest,
+                       DISABLED_RSSParseFeedInvalidFeed2) {
   ASSERT_TRUE(embedded_test_server()->Start());
 
   const Extension* extension = LoadExtension(
@@ -324,7 +320,13 @@ IN_PROC_BROWSER_TEST_F(ExtensionBrowserTest, RSSParseFeedInvalidFeed2) {
       "element 'desc_0' not found", "This feed contains no entries.", "Error");
 }
 
-IN_PROC_BROWSER_TEST_F(ExtensionBrowserTest, RSSParseFeedInvalidFeed3) {
+// TODO(https://crbug.com/331144174): Flakey on Linux ASan LSan.
+#if BUILDFLAG(IS_LINUX) && defined(ADDRESS_SANITIZER) && defined(LEAK_SANITIZER)
+#define MAYBE_RSSParseFeedInvalidFeed3 DISABLED_RSSParseFeedInvalidFeed3
+#else
+#define MAYBE_RSSParseFeedInvalidFeed3 RSSParseFeedInvalidFeed3
+#endif
+IN_PROC_BROWSER_TEST_F(ExtensionBrowserTest, MAYBE_RSSParseFeedInvalidFeed3) {
   ASSERT_TRUE(embedded_test_server()->Start());
 
   const Extension* extension = LoadExtension(

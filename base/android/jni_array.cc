@@ -4,29 +4,12 @@
 
 #include "base/android/jni_array.h"
 
-#include <ostream>
-
 #include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
 #include "base/check_op.h"
 #include "base/numerics/safe_conversions.h"
 
-namespace base {
-namespace android {
-namespace {
-
-// As |GetArrayLength| makes no guarantees about the returned value (e.g., it
-// may be -1 if |array| is not a valid Java array), provide a safe wrapper
-// that always returns a valid, non-negative size.
-template <typename JavaArrayType>
-size_t SafeGetArrayLength(JNIEnv* env, const JavaRef<JavaArrayType>& jarray) {
-  DCHECK(jarray);
-  jsize length = env->GetArrayLength(jarray.obj());
-  DCHECK_GE(length, 0) << "Invalid array length: " << length;
-  return static_cast<size_t>(std::max(0, length));
-}
-
-}  // namespace
+namespace base::android {
 
 ScopedJavaLocalRef<jbyteArray> ToJavaByteArray(JNIEnv* env,
                                                const uint8_t* bytes,
@@ -51,8 +34,7 @@ ScopedJavaLocalRef<jbyteArray> ToJavaByteArray(
 
 ScopedJavaLocalRef<jbyteArray> ToJavaByteArray(JNIEnv* env,
                                                const std::string& str) {
-  return ToJavaByteArray(env, reinterpret_cast<const uint8_t*>(str.data()),
-                         str.size());
+  return ToJavaByteArray(env, base::as_byte_span(str));
 }
 
 ScopedJavaLocalRef<jbooleanArray> ToJavaBooleanArray(JNIEnv* env,
@@ -155,10 +137,10 @@ BASE_EXPORT ScopedJavaLocalRef<jdoubleArray> ToJavaDoubleArray(
 
 BASE_EXPORT ScopedJavaLocalRef<jobjectArray> ToJavaArrayOfObjects(
     JNIEnv* env,
-    ScopedJavaLocalRef<jclass> clazz,
+    jclass clazz,
     base::span<const ScopedJavaLocalRef<jobject>> v) {
   jobjectArray joa =
-      env->NewObjectArray(checked_cast<jsize>(v.size()), clazz.obj(), nullptr);
+      env->NewObjectArray(checked_cast<jsize>(v.size()), clazz, nullptr);
   CheckException(env);
 
   for (size_t i = 0; i < v.size(); ++i) {
@@ -170,16 +152,14 @@ BASE_EXPORT ScopedJavaLocalRef<jobjectArray> ToJavaArrayOfObjects(
 BASE_EXPORT ScopedJavaLocalRef<jobjectArray> ToJavaArrayOfObjects(
     JNIEnv* env,
     base::span<const ScopedJavaLocalRef<jobject>> v) {
-  return ToJavaArrayOfObjects(env, GetClass(env, "java/lang/Object"), v);
+  return ToJavaArrayOfObjects(env, jni_zero::g_object_class, v);
 }
 
 BASE_EXPORT ScopedJavaLocalRef<jobjectArray> ToJavaArrayOfObjects(
     JNIEnv* env,
     base::span<const ScopedJavaGlobalRef<jobject>> v) {
-  ScopedJavaLocalRef<jclass> object_array_clazz =
-      GetClass(env, "java/lang/Object");
   jobjectArray joa = env->NewObjectArray(checked_cast<jsize>(v.size()),
-                                         object_array_clazz.obj(), nullptr);
+                                         jni_zero::g_object_class, nullptr);
   CheckException(env);
 
   for (size_t i = 0; i < v.size(); ++i) {
@@ -191,9 +171,9 @@ BASE_EXPORT ScopedJavaLocalRef<jobjectArray> ToJavaArrayOfObjects(
 BASE_EXPORT ScopedJavaLocalRef<jobjectArray> ToTypedJavaArrayOfObjects(
     JNIEnv* env,
     base::span<const ScopedJavaLocalRef<jobject>> v,
-    ScopedJavaLocalRef<jclass> type) {
+    jclass type) {
   jobjectArray joa =
-      env->NewObjectArray(checked_cast<jsize>(v.size()), type.obj(), nullptr);
+      env->NewObjectArray(checked_cast<jsize>(v.size()), type, nullptr);
   CheckException(env);
 
   for (size_t i = 0; i < v.size(); ++i) {
@@ -205,9 +185,9 @@ BASE_EXPORT ScopedJavaLocalRef<jobjectArray> ToTypedJavaArrayOfObjects(
 BASE_EXPORT ScopedJavaLocalRef<jobjectArray> ToTypedJavaArrayOfObjects(
     JNIEnv* env,
     base::span<const ScopedJavaGlobalRef<jobject>> v,
-    ScopedJavaLocalRef<jclass> type) {
+    jclass type) {
   jobjectArray joa =
-      env->NewObjectArray(checked_cast<jsize>(v.size()), type.obj(), nullptr);
+      env->NewObjectArray(checked_cast<jsize>(v.size()), type, nullptr);
   CheckException(env);
 
   for (size_t i = 0; i < v.size(); ++i) {
@@ -225,8 +205,7 @@ ScopedJavaLocalRef<jobjectArray> ToJavaArrayOfByteArray(
   CheckException(env);
 
   for (size_t i = 0; i < v.size(); ++i) {
-    ScopedJavaLocalRef<jbyteArray> byte_array = ToJavaByteArray(
-        env, reinterpret_cast<const uint8_t*>(v[i].data()), v[i].length());
+    ScopedJavaLocalRef<jbyteArray> byte_array = ToJavaByteArray(env, v[i]);
     env->SetObjectArrayElement(joa, static_cast<jsize>(i), byte_array.obj());
   }
   return ScopedJavaLocalRef<jobjectArray>(env, joa);
@@ -241,8 +220,7 @@ ScopedJavaLocalRef<jobjectArray> ToJavaArrayOfByteArray(
   CheckException(env);
 
   for (size_t i = 0; i < v.size(); ++i) {
-    ScopedJavaLocalRef<jbyteArray> byte_array =
-        ToJavaByteArray(env, v[i].data(), v[i].size());
+    ScopedJavaLocalRef<jbyteArray> byte_array = ToJavaByteArray(env, v[i]);
     env->SetObjectArrayElement(joa, static_cast<jsize>(i), byte_array.obj());
   }
   return ScopedJavaLocalRef<jobjectArray>(env, joa);
@@ -251,9 +229,8 @@ ScopedJavaLocalRef<jobjectArray> ToJavaArrayOfByteArray(
 ScopedJavaLocalRef<jobjectArray> ToJavaArrayOfStrings(
     JNIEnv* env,
     base::span<const std::string> v) {
-  ScopedJavaLocalRef<jclass> string_clazz = GetClass(env, "java/lang/String");
   jobjectArray joa = env->NewObjectArray(checked_cast<jsize>(v.size()),
-                                         string_clazz.obj(), nullptr);
+                                         jni_zero::g_string_class, nullptr);
   CheckException(env);
 
   for (size_t i = 0; i < v.size(); ++i) {
@@ -304,9 +281,8 @@ ScopedJavaLocalRef<jobjectArray> ToJavaArrayOfStringArray(
 ScopedJavaLocalRef<jobjectArray> ToJavaArrayOfStrings(
     JNIEnv* env,
     base::span<const std::u16string> v) {
-  ScopedJavaLocalRef<jclass> string_clazz = GetClass(env, "java/lang/String");
   jobjectArray joa = env->NewObjectArray(checked_cast<jsize>(v.size()),
-                                         string_clazz.obj(), nullptr);
+                                         jni_zero::g_string_class, nullptr);
   CheckException(env);
 
   for (size_t i = 0; i < v.size(); ++i) {
@@ -372,6 +348,19 @@ void JavaByteArrayToByteVector(JNIEnv* env,
   DCHECK(byte_array);
   out->clear();
   AppendJavaByteArrayToByteVector(env, byte_array, out);
+}
+
+size_t JavaByteArrayToByteSpan(JNIEnv* env,
+                               const JavaRef<jbyteArray>& byte_array,
+                               base::span<uint8_t> dest) {
+  CHECK(byte_array);
+  size_t len = SafeGetArrayLength(env, byte_array);
+  size_t span_len = dest.size_bytes();
+  CHECK_GE(span_len, len) << "Target span is too small, java array size: "
+                          << len << ", span size: " << span_len;
+  env->GetByteArrayRegion(byte_array.obj(), 0, static_cast<jsize>(len),
+                          reinterpret_cast<int8_t*>(dest.data()));
+  return len;
 }
 
 void JavaByteArrayToString(JNIEnv* env,
@@ -540,5 +529,4 @@ void JavaArrayOfIntArrayToIntVector(JNIEnv* env,
   }
 }
 
-}  // namespace android
-}  // namespace base
+}  // namespace base::android

@@ -1,11 +1,11 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/platform/graphics/video_frame_resource_provider.h"
 
 #include <memory>
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/threading/thread_restrictions.h"
 #include "base/trace_event/trace_event.h"
 #include "components/viz/client/client_resource_provider.h"
@@ -14,6 +14,7 @@
 #include "components/viz/common/quads/solid_color_draw_quad.h"
 #include "components/viz/common/quads/texture_draw_quad.h"
 #include "components/viz/common/quads/yuv_video_draw_quad.h"
+#include "gpu/ipc/client/client_shared_image_interface.h"
 #include "media/base/limits.h"
 #include "media/base/video_frame.h"
 #include "media/renderers/video_resource_updater.h"
@@ -35,7 +36,8 @@ VideoFrameResourceProvider::~VideoFrameResourceProvider() {
 
 void VideoFrameResourceProvider::Initialize(
     viz::RasterContextProvider* media_context_provider,
-    viz::SharedBitmapReporter* shared_bitmap_reporter) {
+    viz::SharedBitmapReporter* shared_bitmap_reporter,
+    scoped_refptr<gpu::ClientSharedImageInterface> shared_image_interface) {
   context_provider_ = media_context_provider;
   resource_provider_ = std::make_unique<viz::ClientResourceProvider>();
 
@@ -48,10 +50,9 @@ void VideoFrameResourceProvider::Initialize(
   }
 
   resource_updater_ = std::make_unique<media::VideoResourceUpdater>(
-      nullptr, media_context_provider, shared_bitmap_reporter,
-      resource_provider_.get(), settings_.use_stream_video_draw_quad,
-      settings_.resource_settings.use_gpu_memory_buffer_resources,
-      settings_.resource_settings.use_r16_texture, max_texture_size);
+      media_context_provider, shared_bitmap_reporter, resource_provider_.get(),
+      std::move(shared_image_interface), settings_.use_stream_video_draw_quad,
+      settings_.use_gpu_memory_buffer_resources, max_texture_size);
 }
 
 void VideoFrameResourceProvider::OnContextLost() {
@@ -121,7 +122,7 @@ void VideoFrameResourceProvider::AppendQuads(
 
   resource_updater_->AppendQuads(render_pass, std::move(frame), transform,
                                  quad_rect, visible_quad_rect, mask_filter_info,
-                                 /*clip_rect=*/absl::nullopt, is_opaque,
+                                 /*clip_rect=*/std::nullopt, is_opaque,
                                  draw_opacity, sorting_context_id);
 }
 
