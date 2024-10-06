@@ -69,7 +69,9 @@ jobs:
       
       # If you want to use only the SSD, you can use:
       - name: On SSD - Creating symlink on /dev/disk/azure/root-part1 pointing to /dev/disk/azure/resource-part1
-        run: sudo ln -s /extended_data /mnt/secondary_disk ; sudo ln -s /mnt/secondary_disk $GITHUB_WORKSPACE/
+        run: |
+          sudo ln -s /extended_data /mnt/secondary_disk
+          sudo ln -s /mnt/secondary_disk "$GITHUB_WORKSPACE/"
       # or alternatively, to work on the main partition
       # - name: On HDD - Creating symlink on /dev/disk/azure/root-part1 pointing to /dev/disk/azure/resource-part1
       #  run: |
@@ -88,7 +90,13 @@ jobs:
         run: cat .build/android_arm/args.gn | sed "s#target_cpu = \"arm\"#target_cpu = \"${{ matrix.platform }}\"#" | sed "s#android_default_version_name = \"Git\"#android_default_version_name = \"Git$(date '+%y%m%d')Gen${{ github.run_id }}\"#" > secondary_disk/out/android_${{ matrix.platform }}/args.gn
 
       - name: Creating rclone config
-        run: mkdir -p $HOME/.config/rclone/ ; echo '[cache]' > $HOME/.config/rclone/rclone.conf ; echo 'type = sftp' >> $HOME/.config/rclone/rclone.conf ; echo 'host = ${{ secrets.STORAGE_HOST }}' >> $HOME/.config/rclone/rclone.conf ; echo 'user = storage' >> $HOME/.config/rclone/rclone.conf ; echo 'key_pem = ${{ secrets.STORAGE_KEY }}' >> $HOME/.config/rclone/rclone.conf
+        run: |
+          mkdir -p $HOME/.config/rclone/
+          echo '[cache]' > $HOME/.config/rclone/rclone.conf
+          echo 'type = sftp' >> $HOME/.config/rclone/rclone.conf
+          echo 'host = ${{ secrets.STORAGE_HOST }}' >> $HOME/.config/rclone/rclone.conf
+          echo 'user = storage' >> $HOME/.config/rclone/rclone.conf
+          echo 'key_pem = ${{ secrets.STORAGE_KEY }}' >> $HOME/.config/rclone/rclone.conf
 
       - name: Modifying args.gn (arm)
         if: matrix.platform == 'arm'
