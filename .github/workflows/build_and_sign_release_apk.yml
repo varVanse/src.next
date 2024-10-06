@@ -95,7 +95,7 @@ jobs:
           echo '[cache]' > "$HOME/.config/rclone/rclone.conf"
           echo 'type = sftp' >> "$HOME/.config/rclone/rclone.conf"
           echo 'host = ${{ secrets.STORAGE_HOST }}' >> "$HOME/.config/rclone/rclone.conf"
-          echo 'user = storage' >> $HOME/.config/rclone/rclone.conf
+          echo 'user = storage' >> "$HOME/.config/rclone/rclone.conf"
           echo 'key_pem = ${{ secrets.STORAGE_KEY }}' >> "$HOME/.config/rclone/rclone.conf"
 
       - name: Modifying args.gn (arm)
@@ -135,8 +135,8 @@ jobs:
 
       - name: Listing files
         run: |
-          echo $HOME
-          ls -la $HOME/kiwibrowser-next-builds-${{ matrix.platform }}
+          echo "$HOME"
+          ls -la "$HOME/kiwibrowser-next-builds-${{ matrix.platform }}"
 
       - name: Uploading APK
         uses: actions/upload-artifact@v1
@@ -154,12 +154,12 @@ jobs:
     
       - name: Creating rclone config
         run: |
-          mkdir -p $HOME/.config/rclone/
-          echo '[cache]' > $HOME/.config/rclone/rclone.conf
-          echo 'type = sftp' >> $HOME/.config/rclone/rclone.conf
-          echo 'host = ${{ secrets.STORAGE_HOST }}' >> $HOME/.config/rclone/rclone.conf
-          echo 'user = storage' >> $HOME/.config/rclone/rclone.conf
-          echo 'key_pem = ${{ secrets.STORAGE_KEY }}' >> $HOME/.config/rclone/rclone.conf
+          mkdir -p "$HOME/.config/rclone/"
+          echo '[cache]' > "$HOME/.config/rclone/rclone.conf"
+          echo 'type = sftp' >> "$HOME/.config/rclone/rclone.conf"
+          echo 'host = ${{ secrets.STORAGE_HOST }}' >> "$HOME/.config/rclone/rclone.conf"
+          echo 'user = storage' >> "$HOME/.config/rclone/rclone.conf"
+          echo 'key_pem = ${{ secrets.STORAGE_KEY }}' >> "$HOME/.config/rclone/rclone.conf"
 
 
       - name: Downloading artifact (arm)
